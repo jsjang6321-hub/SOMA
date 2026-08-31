@@ -75,6 +75,9 @@ final class PersistentAppServerBroker: @unchecked Sendable {
         guard let guardianURL = ParentBoundProcess.installedGuardianURL() else {
             return .failure(BrokerError.launchFailed("child_guardian_unavailable"))
         }
+        guard let mcpConfig = Self.embodimentMCPConfig(capability: capability) else {
+            return .failure(BrokerError.launchFailed("embodiment_mcp_unavailable"))
+        }
 
         let basePort = Int.random(in: 38_000...48_000)
         for offset in 0..<8 {
@@ -84,7 +87,7 @@ final class PersistentAppServerBroker: @unchecked Sendable {
                 "app-server",
                 "--listen", endpoint.absoluteString,
                 "--enable", "realtime_conversation",
-                "--config", "mcp_servers.soma_embodiment.env={SOMA_SESSION_TOKEN=\"\(capability)\"}",
+                "--config", mcpConfig,
             ]
             let guardianProcess: ParentBoundProcess
             do {
@@ -136,4 +139,21 @@ final class PersistentAppServerBroker: @unchecked Sendable {
         return readiness.get()
     }
 
+    private static func embodimentMCPConfig(capability: String) -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let appRoot = environment["SOMA_APP_ROOT"]
+            ?? "\(home)/Library/Application Support/SOMA/Applications/SOMA Subconscious.app"
+        let runtimeRoot = environment["SOMA_RUNTIME_ROOT"]
+            ?? "\(environment["SOMA_ROOT"] ?? FileManager.default.currentDirectoryPath)/artifacts/subconscious/runtime"
+        let executable = "\(appRoot)/Contents/Helpers/soma-embodiment"
+        let socket = "\(runtimeRoot)/ipc/embodiment-shadow.sock"
+        guard FileManager.default.isExecutableFile(atPath: executable) else { return nil }
+        func quoted(_ value: String) -> String {
+            "\"" + value
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        return "mcp_servers.soma_embodiment={command=\(quoted(executable)),args=[\(quoted("--socket")),\(quoted(socket))],env={SOMA_SESSION_TOKEN=\(quoted(capability))}}"
+    }
 }

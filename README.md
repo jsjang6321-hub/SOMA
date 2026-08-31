@@ -238,6 +238,31 @@ anchors the stored worker session to its selected workspace so it remains under
 the correct project instead of falling into Hermes Desktop's synthetic Home
 bucket.
 
+### Discord and `@Labmanager`
+
+The Control Center can connect an existing Discord bot to one explicitly
+allowlisted channel or thread. After L0 has attributed a finalized spoken turn
+to the enrolled administrator, SOMA posts that transcript to the configured
+channel and mentions only the configured Labmanager bot user or managed role.
+A reply is accepted only when its channel ID and bot author ID both match the saved
+allowlist and it echoes the request's one-time `voice-corr` marker. The existing
+Labmanager deployment uses a direct bot-user mention; a managed-role mention is
+also selectable for other deployments. When the originating Live Voice session
+is still active, the reply is returned as a controller envelope and read aloud;
+Discord text is never
+treated as participant authorization and cannot authorize tools or external
+work.
+
+The Discord bot token is sealed with ChaChaPoly in SOMA's owner-only local
+credential store rather than `settings.json`, the repository, process arguments,
+environment variables, or runtime traces. This follows the same unattended-worker
+boundary as SOMA's other encrypted local stores and avoids GUI authorization
+prompts during LaunchAgent startup. Enable Discord's Message Content Intent for
+the SOMA bot and grant only View Channel, Send Messages, and Read Message
+History in the selected channel. HTTP rate-limit responses are retried from
+Discord's returned delay instead of using a hard-coded request quota. Configure
+the bridge under **Control Center → Experience → Discord · @Labmanager**.
+
 ## Memory as continuity, not a transcript dump
 
 SOMA keeps several different forms of memory because an interaction has more
@@ -312,6 +337,9 @@ by default.
   explicit actions with confirmation.
 - L1 and L2 can express high-level embodied intent, but only L0 owns final
   motion safety and the physical stop path.
+- Discord forwarding is off by default and is restricted to finalized
+  administrator speech, one channel, and one response bot. Controller envelopes
+  are excluded from re-forwarding so two bots cannot create a response loop.
 
 See [COGNITIVE_ARCHITECTURE.md](COGNITIVE_ARCHITECTURE.md) for the detailed
 authority, memory, and privacy contracts.

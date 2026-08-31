@@ -20,6 +20,8 @@ enum AppServerLiveVoiceEvent: Sendable {
     case embodimentMCPUnavailable(reason: String)
     case hermesTaskResultAccepted(taskID: UUID)
     case hermesTaskResultRejected(taskID: UUID?, reason: String)
+    case discordReplyAccepted
+    case discordReplyRejected(reason: String)
     case personContextReady
     case personContextUnavailable(reason: String)
     case embodimentMCPCall(tool: String, status: String, error: String?)
@@ -646,6 +648,28 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
         }
     }
 
+    /// Routes one allowlisted Discord bot reply into the active realtime
+    /// conversation. The envelope is controller input, never participant
+    /// speech or authorization, and it cannot open a session on its own.
+    func deliverDiscordReply(_ rawText: String, messageID: String) -> Bool {
+        queue.sync {
+            guard active else { return false }
+            let reply = SOMADiscordConversationClient.spokenReply(from: rawText)
+            guard !reply.isEmpty else { return false }
+            let safeMessageID = String(messageID.filter(\.isNumber).prefix(24))
+            let envelope = """
+            SOMA_DISCORD_LABMANAGER_REPLY
+            message_id: \(safeMessageID)
+            reply:
+            \(reply)
+            """
+            return send([
+                "type": "append_controller_text",
+                "data": envelope,
+            ])
+        }
+    }
+
     private func sendHermesTaskResult(_ task: HermesAgentTask) -> Bool {
         guard active,
               task.status == .completed,
@@ -924,6 +948,12 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                 }
                 onEvent(.hermesTaskResultRejected(
                     taskID: event.taskID.flatMap(UUID.init(uuidString:)),
+                    reason: String((event.reason ?? "unknown").prefix(192))
+                ))
+            case "discord_reply_accepted":
+                onEvent(.discordReplyAccepted)
+            case "discord_reply_rejected":
+                onEvent(.discordReplyRejected(
                     reason: String((event.reason ?? "unknown").prefix(192))
                 ))
             case "person_context_ready":
@@ -1331,6 +1361,7 @@ func testAppServerLiveVoiceLauncher() -> String {
              .hermesTaskResultAccepted, .hermesTaskResultRejected,
              .personContextUnavailable, .embodimentMCPCall, .inputAccepted,
              .transcriptFinalized, .preparingResponse, .responseStarted,
+             .discordReplyAccepted, .discordReplyRejected,
              .assistantSpeechStarted, .assistantSpeechEnded,
              .assistantOutputReferenceReady, .microphoneCaptureSuppressed,
              .playbackEchoAssessed, .participantBargeInAdmitted, .acousticEchoDiscarded,

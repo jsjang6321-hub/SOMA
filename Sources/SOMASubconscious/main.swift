@@ -70,6 +70,7 @@ func warmUpL1Model() {
         "model": model,
         "prompt": "ping",
         "stream": false,
+        "think": false,
         "keep_alive": 600,
         "options": ["num_predict": 1],
     ]
@@ -545,6 +546,7 @@ func performL1ObjectIdentification(jpeg: Data) -> String {
         "model": model,
         "messages": messages,
         "stream": false,
+        "think": false,
         "options": ["temperature": 0, "num_predict": 384]
     ]
     guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -619,6 +621,7 @@ func performL1SpaceClassification(jpeg: Data) -> String {
         "model": model,
         "messages": messages,
         "stream": false,
+        "think": false,
         "options": ["temperature": 0, "num_predict": 384]
     ]
     guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -685,6 +688,7 @@ func performL1AnonymousReview(
         "prompt": prompt,
         "images": [imageData.base64EncodedString()],
         "stream": false,
+        "think": false,
         "format": "json",
         "options": ["temperature": 0.2, "num_predict": 32]
     ]
@@ -12513,6 +12517,44 @@ private func run(_ options: Options) throws {
             message: String(error.localizedDescription.prefix(192))
         ))
     }
+    let discordConversationClient: SOMADiscordConversationClient?
+    if controlSettings.discord.isConfigured {
+        do {
+            if let token = try SOMADiscordSecretStore().loadToken() {
+                discordConversationClient = SOMADiscordConversationClient(
+                    settings: controlSettings.discord,
+                    token: token
+                )
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: monotonicNanoseconds(),
+                    source: "discord_bridge",
+                    state: "armed",
+                    message: "channel_allowlisted=true; labmanager_allowlisted=true; token=sealed_owner_only_store; transcript_trace=false"
+                ))
+            } else {
+                discordConversationClient = nil
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: monotonicNanoseconds(),
+                    source: "discord_bridge",
+                    state: "unavailable",
+                    message: "discord_bot_token_missing"
+                ))
+            }
+        } catch {
+            discordConversationClient = nil
+            writer.write(RuntimeEvent(
+                event: "source.health",
+                monotonicNS: monotonicNanoseconds(),
+                source: "discord_bridge",
+                state: "unavailable",
+                message: String(error.localizedDescription.prefix(192))
+            ))
+        }
+    } else {
+        discordConversationClient = nil
+    }
     let identityPresence = IdentityPresenceCoordinator(
         administrator: controlSettings.administrator,
         openWithUnknownIdentity: somaEnvBool("SOMA_L1_OPEN_WITH_UNKNOWN", default: false)
@@ -13402,6 +13444,66 @@ private func run(_ options: Options) throws {
                         }
                     }
                 }
+                if role == .user,
+                   controlSettings.discord.forwardAdministratorSpeech,
+                   SOMADiscordConversationClient.shouldForwardTranscript(text),
+                   let discordConversationClient,
+                   identityPresence.currentParticipant()?.authority == .administrator {
+                    Task {
+                        do {
+                            let reply = try await discordConversationClient.forwardAdministratorTranscript(
+                                text,
+                                conversationID: threadID
+                            )
+                            guard let reply else {
+                                writer.write(RuntimeEvent(
+                                    event: "source.health",
+                                    monotonicNS: monotonicNanoseconds(),
+                                    source: "discord_bridge",
+                                    state: "reply_timeout",
+                                    message: "labmanager_response_not_observed"
+                                ))
+                                return
+                            }
+                            let delivered = controlSettings.discord.readLabmanagerRepliesAloud
+                                && (liveVoiceBox.launcher?.deliverDiscordReply(
+                                    reply.content,
+                                    messageID: reply.id
+                                ) ?? false)
+                            writer.write(RuntimeEvent(
+                                event: "discord.message",
+                                monotonicNS: monotonicNanoseconds(),
+                                source: "discord_bridge",
+                                state: delivered ? "reply_delivery_requested" : "reply_not_delivered",
+                                message: "channel_allowlisted=true; author=labmanager; characters=\(reply.content.count)"
+                            ))
+                        } catch {
+                            writer.write(RuntimeEvent(
+                                event: "source.health",
+                                monotonicNS: monotonicNanoseconds(),
+                                source: "discord_bridge",
+                                state: "request_failed",
+                                message: String(error.localizedDescription.prefix(192))
+                            ))
+                        }
+                    }
+                }
+            case .discordReplyAccepted:
+                writer.write(RuntimeEvent(
+                    event: "discord.message",
+                    monotonicNS: eventNS,
+                    source: "discord_bridge",
+                    state: "reply_accepted_by_live_voice",
+                    message: "controller_envelope=true; participant_authorization=false"
+                ))
+            case let .discordReplyRejected(reason):
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: eventNS,
+                    source: "discord_bridge",
+                    state: "reply_rejected_by_live_voice",
+                    message: String(reason.prefix(192))
+                ))
             case .preparingResponse:
                 l1LiveConversationState.setParticipantSpeaking(false)
                 attentionGimbalBridge?.ingestLiveVoicePresentation(.preparingResponse)
@@ -14744,8 +14846,11 @@ private func run(_ options: Options) throws {
                     message: "new_conversation_evidence_unconfirmed; tracked_face=\(visualAdmission); direct_gaze=\(speakerSnapshot.evidence.directGaze); speaker_class=\(speakerSnapshot.assessment.classification.rawValue); speaker_episode=\(speakerEpisode.state.rawValue); speech_qualified=\(speakerEpisode.speechEvidence.qualified); strong_windows=\(speakerEpisode.speechEvidence.strongWindowCount); supporting_windows=\(speakerEpisode.speechEvidence.supportingWindowCount)"
                 ))
             }
+            let administratorOpeningAllowed = !controlSettings.administratorOnlyConversations
+                || recognizedParticipant?.authority == .administrator
             if let openingAuthorization,
-               options.l2LiveVoice {
+               options.l2LiveVoice,
+               administratorOpeningAllowed {
                 let sessionCapability = liveSessionCapabilities.issue(
                     personEntityID: interactionParticipant.entityID,
                     authority: interactionParticipant.authority,
@@ -14779,6 +14884,16 @@ private func run(_ options: Options) throws {
                     personEntityID: interactionParticipant.entityID,
                     at: completedNS
                 )
+            } else if openingAuthorization != nil,
+                      controlSettings.administratorOnlyConversations,
+                      !administratorOpeningAllowed {
+                writer.write(RuntimeEvent(
+                    event: "human.interaction",
+                    monotonicNS: completedNS,
+                    source: "l2_live_voice",
+                    state: "opening_suppressed",
+                    message: "administrator_only=true; recognized_administrator=false"
+                ))
             } else if openingAuthorization != nil, !options.l2LiveVoice {
                 writer.write(RuntimeEvent(
                     event: "source.health",
@@ -14797,8 +14912,12 @@ private func run(_ options: Options) throws {
                 || openingAuthorization != nil
                 || strictConfirmedWindow
             if shouldTraceSpeakerTransition || evidence.active {
-                let strictTurnAdmission = !controlSettings
-                    .realtimeVoiceRequiresEyeContactForEveryTurn || confirmedTrackedSpeaker
+                let administratorTurnAllowed = !controlSettings.administratorOnlyConversations
+                    || recognizedParticipant?.authority == .administrator
+                let strictTurnAdmission = administratorTurnAllowed && (
+                    !controlSettings.realtimeVoiceRequiresEyeContactForEveryTurn
+                        || confirmedTrackedSpeaker
+                )
                 let duplexSpeakerVerified = LiveVoiceDuplexSpeakerPolicy.verifiesParticipant(
                     trackedFaceVisible: visualAdmission,
                     independentSpeakerEvidence: speakerEpisode.speakerEvidenceObserved,

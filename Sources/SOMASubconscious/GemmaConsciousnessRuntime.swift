@@ -41,6 +41,7 @@ final class GemmaConsciousnessRuntime: @unchecked Sendable {
         let model: String
         let messages: [Message]
         let stream = false
+        let think = false
         let format = "json"
         let options: Options
 

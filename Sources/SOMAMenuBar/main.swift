@@ -242,6 +242,9 @@ private final class SOMAControlModel: ObservableObject {
     @Published private(set) var message: String?
     @Published private(set) var ollamaConnection: OllamaConnectionState = .unchecked
     @Published private(set) var externalDependencyAudit: ExternalDependencyAuditState = .unchecked
+    @Published var discordTokenDraft = ""
+    @Published private(set) var discordTokenConfigured = false
+    @Published private(set) var discordConnectionMessage: String?
     private var ollamaValidationGeneration = UUID()
     // Administrator identity fields stay locked until the Mac login password
     // (or Touch ID) unlocks them, so changing or removing the owner is not a
@@ -252,6 +255,7 @@ private final class SOMAControlModel: ObservableObject {
 
     private let store: SOMAControlSettingsStore
     private let envStore: SOMAEnvStore
+    private let discordSecretStore = SOMADiscordSecretStore()
     init(store: SOMAControlSettingsStore = .init()) {
         self.store = store
         self.envStore = .init()
@@ -269,6 +273,7 @@ private final class SOMAControlModel: ObservableObject {
         }
         administratorDraftName = settings.administrator?.displayName ?? ""
         administratorDraftAddress = settings.administrator?.preferredAddress ?? ""
+        discordTokenConfigured = ((try? discordSecretStore.loadToken()) ?? nil) != nil
         refresh()
         _ = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -406,9 +411,47 @@ private final class SOMAControlModel: ObservableObject {
             )
             try store.save(settings)
             try envStore.save(normalizedEnvSettings)
+            let pendingDiscordToken = discordTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !pendingDiscordToken.isEmpty {
+                try discordSecretStore.saveToken(pendingDiscordToken)
+                discordTokenConfigured = true
+                discordTokenDraft = ""
+            }
             envSettings = normalizedEnvSettings
             message = "Saved locally. Restart SOMA to apply runtime changes."
             refresh()
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    func validateDiscordConnection() async {
+        guard settings.discord.isConfigured else {
+            discordConnectionMessage = "Enter a valid channel and Labmanager invocation IDs."
+            return
+        }
+        do {
+            let token = try discordSecretStore.loadToken()
+            guard let token else {
+                discordConnectionMessage = "Save a Discord bot token first."
+                return
+            }
+            discordConnectionMessage = "Checking Discord…"
+            let client = SOMADiscordConversationClient(settings: settings.discord, token: token)
+            let username = try await client.validateConnection()
+            discordConnectionMessage = "Connected as \(username)."
+        } catch {
+            discordConnectionMessage = error.localizedDescription
+        }
+    }
+
+    func removeDiscordToken() async {
+        guard await authenticateMacLogin(reason: "Remove SOMA's Discord bot token") else { return }
+        do {
+            try discordSecretStore.deleteToken()
+            discordTokenDraft = ""
+            discordTokenConfigured = false
+            discordConnectionMessage = "Discord bot token removed."
         } catch {
             message = error.localizedDescription
         }
@@ -883,6 +926,14 @@ private struct SOMASettingsView: View {
                 Text("When enabled, an open conversation forwards a spoken turn only when current eye contact and audiovisual evidence identify the tracked person as the speaker.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle(
+                    "Only the enrolled administrator may start voice conversations",
+                    isOn: binding(\.administratorOnlyConversations)
+                )
+                .disabled(!model.settings.realtimeVoiceEnabled)
+                Text("Unknown people and registered participants remain available to local perception, but their speech cannot open L2 or reach connected services.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     Text("End after user silence")
                     Spacer()
@@ -923,6 +974,68 @@ private struct SOMASettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Jobs run through Hermes' primary computer-supervisor profile and remain attached to the selected workspace instead of falling into Home.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            SettingsCard(
+                title: "Discord · @Labmanager",
+                subtitle: "Forward verified administrator speech to one allowlisted Discord channel and read the existing bot's reply aloud."
+            ) {
+                Toggle("Enable Discord conversation bridge", isOn: discordEnabledBinding)
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Channel ID").foregroundStyle(.secondary)
+                        TextField("Discord channel or thread ID", text: discordChannelIDBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text("Labmanager bot ID").foregroundStyle(.secondary)
+                        TextField("Bot user ID", text: discordLabmanagerIDBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text("Managed role ID").foregroundStyle(.secondary)
+                        TextField("Role mentioned for invocation", text: discordLabmanagerRoleIDBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.settings.discord.invocationMention != .managedRole)
+                    }
+                    GridRow {
+                        Text("Invoke with").foregroundStyle(.secondary)
+                        Picker("", selection: discordInvocationMentionBinding) {
+                            Text("Bot user mention").tag(SOMADiscordInvocationMention.botUser)
+                            Text("Managed role mention").tag(SOMADiscordInvocationMention.managedRole)
+                        }
+                        .labelsHidden()
+                    }
+                    GridRow {
+                        Text("Bot token").foregroundStyle(.secondary)
+                        SecureField(
+                            model.discordTokenConfigured ? "Saved in SOMA encrypted store" : "Discord bot token",
+                            text: $model.discordTokenDraft
+                        )
+                        .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .disabled(!model.settings.discord.enabled)
+                Toggle("Forward finalized administrator speech immediately", isOn: discordForwardSpeechBinding)
+                    .disabled(!model.settings.discord.enabled)
+                Toggle("Read @Labmanager replies aloud through Live Voice", isOn: discordReadRepliesBinding)
+                    .disabled(!model.settings.discord.enabled)
+                HStack {
+                    Button("Check connection") {
+                        Task { await model.validateDiscordConnection() }
+                    }
+                    .disabled(!model.settings.discord.isConfigured || !model.discordTokenConfigured)
+                    if model.discordTokenConfigured {
+                        Button("Remove token", role: .destructive) {
+                            Task { await model.removeDiscordToken() }
+                        }
+                    }
+                    if let status = model.discordConnectionMessage {
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("The existing Labmanager contract uses Bot user mention. Managed role mention is available for other deployments. Replies must come from the configured bot in this channel and echo the request's voice-corr marker. The token is sealed in SOMA's owner-only local credential store and never enters settings.json or Git.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1371,6 +1484,55 @@ private struct SOMASettingsView: View {
                     ? nil
                     : String($0.prefix(1_024))
             }
+        )
+    }
+
+    private var discordEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.discord.enabled },
+            set: { model.settings.discord.enabled = $0 }
+        )
+    }
+
+    private var discordChannelIDBinding: Binding<String> {
+        Binding(
+            get: { model.settings.discord.channelID },
+            set: { model.settings.discord.channelID = $0.filter(\.isNumber).prefix(24).description }
+        )
+    }
+
+    private var discordLabmanagerIDBinding: Binding<String> {
+        Binding(
+            get: { model.settings.discord.labmanagerBotUserID },
+            set: { model.settings.discord.labmanagerBotUserID = $0.filter(\.isNumber).prefix(24).description }
+        )
+    }
+
+    private var discordLabmanagerRoleIDBinding: Binding<String> {
+        Binding(
+            get: { model.settings.discord.labmanagerRoleID },
+            set: { model.settings.discord.labmanagerRoleID = $0.filter(\.isNumber).prefix(24).description }
+        )
+    }
+
+    private var discordInvocationMentionBinding: Binding<SOMADiscordInvocationMention> {
+        Binding(
+            get: { model.settings.discord.invocationMention },
+            set: { model.settings.discord.invocationMention = $0 }
+        )
+    }
+
+    private var discordForwardSpeechBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.discord.forwardAdministratorSpeech },
+            set: { model.settings.discord.forwardAdministratorSpeech = $0 }
+        )
+    }
+
+    private var discordReadRepliesBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.discord.readLabmanagerRepliesAloud },
+            set: { model.settings.discord.readLabmanagerRepliesAloud = $0 }
         )
     }
 
