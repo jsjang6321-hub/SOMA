@@ -69,7 +69,11 @@ public struct DirectGazeConsensus: Sendable {
     /// Averted or unavailable evidence immediately breaks a direct-gaze run.
     public mutating func stabilize(_ samples: [DirectGazeConsensusSample]) -> [VisualGazeEvidence] {
         guard !samples.isEmpty else {
-            tracks.removeAll()
+            // A detector miss carries no evidence that the person looked
+            // away. Preserve the pending run without advancing it; the next
+            // actual capture will prune it when the inter-sample gap exceeds
+            // `maximumInterSampleNS`. This tolerates one dropped landmark
+            // frame while never letting absence authorize contact.
             return []
         }
 
