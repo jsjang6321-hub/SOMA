@@ -125,8 +125,11 @@ scripts/soma.zsh status
 
 The installer rebuilds from source, signs the local bundle, writes two
 LaunchAgents, and starts or restarts SOMA. Camera, Microphone, Speech
-Recognition, and Accessibility permissions remain explicit per-Mac user
-actions and cannot be made portable through the repository.
+Recognition, Accessibility, and Screen Recording permissions remain explicit
+per-Mac user actions and cannot be made portable through the repository.
+Screen Recording is needed only for an administrator-requested current-display
+capture; Accessibility is needed only for administrator-requested pointer or
+keyboard input.
 
 ## Optional L0.5 MLX-VLM
 

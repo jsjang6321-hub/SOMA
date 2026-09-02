@@ -38,6 +38,7 @@ done
 
 [[ -f "$soma_lock" ]] || { print -u2 -r -- "Missing dependency contract: $soma_lock"; exit 2; }
 source "$soma_lock"
+source "$soma_root/scripts/lib/soma-codex-locator.zsh"
 autoload -Uz is-at-least
 
 function soma_row() {
@@ -61,19 +62,6 @@ function soma_block() {
   soma_row BLOCK "$1" "$2"
   soma_actions+=("$3")
   (( soma_blockers += 1 ))
-}
-
-function soma_find_codex() {
-  local soma_candidate
-  for soma_candidate in \
-    /Applications/Codex.app/Contents/Resources/codex \
-    "$HOME/.local/bin/codex" \
-    "$(command -v codex 2>/dev/null || true)"; do
-    if [[ -n "$soma_candidate" && -x "$soma_candidate" ]]; then
-      print -r -- "$soma_candidate"
-      return
-    fi
-  done
 }
 
 function soma_find_ollama() {
@@ -193,7 +181,7 @@ fi
 
 soma_info 'Local models' 'pinned Gemma L0.5 and ArcFace assets will be verified before activation'
 soma_info 'Code signing' 'a machine-local persistent identity will be created when absent'
-soma_info 'macOS permissions' 'Camera, Microphone, Speech Recognition, and Accessibility prompts appear after installation'
+soma_info 'macOS permissions' 'Camera, Microphone, Speech Recognition, Accessibility, and Screen Recording prompts appear after installation'
 
 print -r -- ''
 print -r -- '------------------------------------------------------------'

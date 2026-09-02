@@ -444,7 +444,7 @@ public struct SOMAAdministratorIdentity: Codable, Equatable, Sendable {
 /// User-controlled settings consumed by the local runtime at process launch.
 /// None of the fields contain face embeddings or other raw biometric material.
 public struct SOMAControlSettings: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 13
+    public static let currentSchemaVersion = 14
     public static let defaultRealtimeVoiceSilenceTimeoutSeconds = 60
     public static let realtimeVoiceSilenceTimeoutRange = 15...600
 
@@ -454,6 +454,10 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
     /// When enabled, an already-open session receives a participant turn only
     /// while current eye contact and audiovisual speaker evidence agree.
     public var realtimeVoiceRequiresEyeContactForEveryTurn: Bool
+    /// When enabled, a newly opened spoken conversation must be bound to the
+    /// enrolled local administrator. Unknown and ordinary participant faces
+    /// remain visible to perception but cannot open L2 voice.
+    public var administratorOnlyConversations: Bool
     /// User silence closes the account-backed realtime session so an idle
     /// microphone never holds conversation resources indefinitely.
     public var realtimeVoiceSilenceTimeoutSeconds: Int
@@ -463,6 +467,7 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
     /// Default filesystem context for delegated work. A task may override it
     /// only with another existing absolute directory.
     public var hermesAgentWorkspace: String?
+    public var discord: SOMADiscordSettings
     public var led: SOMALEDSettings
     /// These settings only narrow the launch-agent capabilities; they can
     /// never grant motion authority that the service was not launched with.
@@ -474,10 +479,12 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
         schemaVersion: Int = SOMAControlSettings.currentSchemaVersion,
         realtimeVoiceEnabled: Bool = true,
         realtimeVoice: SOMARealtimeVoice = .maple,
-        realtimeVoiceRequiresEyeContactForEveryTurn: Bool = false,
+        realtimeVoiceRequiresEyeContactForEveryTurn: Bool = true,
+        administratorOnlyConversations: Bool = true,
         realtimeVoiceSilenceTimeoutSeconds: Int = SOMAControlSettings.defaultRealtimeVoiceSilenceTimeoutSeconds,
         hermesAgentDelegationEnabled: Bool = true,
         hermesAgentWorkspace: String? = nil,
+        discord: SOMADiscordSettings = .init(),
         led: SOMALEDSettings = .init(),
         nativeHumanTrackingEnabled: Bool = true,
         autonomousExplorationEnabled: Bool = true,
@@ -487,12 +494,14 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
         self.realtimeVoiceEnabled = realtimeVoiceEnabled
         self.realtimeVoice = realtimeVoice
         self.realtimeVoiceRequiresEyeContactForEveryTurn = realtimeVoiceRequiresEyeContactForEveryTurn
+        self.administratorOnlyConversations = administratorOnlyConversations
         self.realtimeVoiceSilenceTimeoutSeconds = min(
             max(realtimeVoiceSilenceTimeoutSeconds, Self.realtimeVoiceSilenceTimeoutRange.lowerBound),
             Self.realtimeVoiceSilenceTimeoutRange.upperBound
         )
         self.hermesAgentDelegationEnabled = hermesAgentDelegationEnabled
         self.hermesAgentWorkspace = Self.normalizedAbsolutePath(hermesAgentWorkspace)
+        self.discord = discord
         self.led = led
         self.nativeHumanTrackingEnabled = nativeHumanTrackingEnabled
         self.autonomousExplorationEnabled = autonomousExplorationEnabled
@@ -506,9 +515,11 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
         case realtimeVoiceEnabled
         case realtimeVoice
         case realtimeVoiceRequiresEyeContactForEveryTurn
+        case administratorOnlyConversations
         case realtimeVoiceSilenceTimeoutSeconds
         case hermesAgentDelegationEnabled
         case hermesAgentWorkspace
+        case discord
         case led
         case nativeHumanTrackingEnabled
         case autonomousExplorationEnabled
@@ -528,7 +539,11 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
         realtimeVoiceRequiresEyeContactForEveryTurn = try values.decodeIfPresent(
             Bool.self,
             forKey: .realtimeVoiceRequiresEyeContactForEveryTurn
-        ) ?? false
+        ) ?? true
+        administratorOnlyConversations = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .administratorOnlyConversations
+        ) ?? true
         let decodedSilenceTimeout = try values.decodeIfPresent(
             Int.self,
             forKey: .realtimeVoiceSilenceTimeoutSeconds
@@ -544,6 +559,7 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
         hermesAgentWorkspace = Self.normalizedAbsolutePath(
             try values.decodeIfPresent(String.self, forKey: .hermesAgentWorkspace)
         )
+        discord = try values.decodeIfPresent(SOMADiscordSettings.self, forKey: .discord) ?? .init()
         var decodedLED = try values.decodeIfPresent(SOMALEDSettings.self, forKey: .led) ?? .init()
         if sourceVersion < 6,
            decodedLED.signal(for: .contactReady).pattern == .steady {
@@ -584,6 +600,7 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
             realtimeVoiceRequiresEyeContactForEveryTurn,
             forKey: .realtimeVoiceRequiresEyeContactForEveryTurn
         )
+        try values.encode(administratorOnlyConversations, forKey: .administratorOnlyConversations)
         try values.encode(
             realtimeVoiceSilenceTimeoutSeconds,
             forKey: .realtimeVoiceSilenceTimeoutSeconds
@@ -593,6 +610,7 @@ public struct SOMAControlSettings: Codable, Equatable, Sendable {
             Self.normalizedAbsolutePath(hermesAgentWorkspace),
             forKey: .hermesAgentWorkspace
         )
+        try values.encode(discord, forKey: .discord)
         try values.encode(led, forKey: .led)
         try values.encode(nativeHumanTrackingEnabled, forKey: .nativeHumanTrackingEnabled)
         try values.encode(autonomousExplorationEnabled, forKey: .autonomousExplorationEnabled)

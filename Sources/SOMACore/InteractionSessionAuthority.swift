@@ -22,6 +22,13 @@ public enum SOMASessionCapabilityScope: Equatable, Sendable {
     /// External work may read or change resources outside SOMA's embodied
     /// sensor loop, so only the local administrator can delegate or inspect it.
     case externalTaskDelegation
+    /// A current host-screen image can expose private desktop content. Only a
+    /// locally recognized administrator may authorize this bounded read.
+    case hostScreenObservation
+    /// Pointer and keyboard synthesis changes the host computer and therefore
+    /// remains administrator-only in addition to requiring a current explicit
+    /// participant turn through `cognitiveBasis`.
+    case hostInputControl
     case embodimentControl
     /// Records a privacy-bounded outcome from a tool call made by this live
     /// session. It grants no additional read, write, or motor authority.
@@ -44,6 +51,8 @@ public enum SOMASessionCapabilityError: Error, Equatable, LocalizedError {
     case identityRosterDenied
     case identityManagementDenied
     case externalTaskDelegationDenied
+    case hostScreenObservationDenied
+    case hostInputControlDenied
     case embodimentDenied
     case currentParticipantTurnRequired
 
@@ -56,6 +65,8 @@ public enum SOMASessionCapabilityError: Error, Equatable, LocalizedError {
         case .identityRosterDenied: "Only the local administrator may read the identity roster"
         case .identityManagementDenied: "Only the local administrator may enroll or remove local identities"
         case .externalTaskDelegationDenied: "Only the local administrator may delegate or inspect external tasks"
+        case .hostScreenObservationDenied: "Only the local administrator may observe the host screen"
+        case .hostInputControlDenied: "Only the local administrator may control host input"
         case .embodimentDenied: "Only the local administrator may control SOMA embodiment"
         case .currentParticipantTurnRequired: "This cognitive action requires the current participant turn"
         }
@@ -188,6 +199,14 @@ public final class SOMASessionCapabilityStore: @unchecked Sendable {
             return grant.authority == .administrator
                 ? .success(())
                 : .failure(.externalTaskDelegationDenied)
+        case .hostScreenObservation:
+            return grant.authority == .administrator
+                ? .success(())
+                : .failure(.hostScreenObservationDenied)
+        case .hostInputControl:
+            return grant.authority == .administrator
+                ? .success(())
+                : .failure(.hostInputControlDenied)
         case .embodimentControl:
             // Looking, tracking, exploring, and brief expression are SOMA's
             // ordinary embodied conversation, not administrator-only work.

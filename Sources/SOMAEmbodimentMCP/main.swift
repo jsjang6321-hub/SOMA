@@ -297,6 +297,10 @@ private struct ResolveHermesReportOfferArguments: Codable {
     let wantsReport: Bool
 }
 
+private struct HostComputerControlArguments: Codable {
+    let action: HostComputerInputAction
+}
+
 private struct CognitiveIntentArguments: Codable {
     let goalEpisodeId: UUID
     let purpose: String
@@ -369,7 +373,7 @@ private final class EmbodimentMCPServer {
                 "protocolVersion": supportedProtocolVersion,
                 "capabilities": ["tools": ["listChanged": false]],
                 "serverInfo": ["name": "soma-embodiment", "version": "0.5.0"],
-                "instructions": "Leased SOMA cognition tools routed to the local L0 owner. get_robot_body_state describes only camera, gimbal, and attention state; host-computer work belongs to delegate_hermes_task when explicitly requested by the administrator. capture_view returns an MCP image and a short-lived local resource link. Inspect physical_actuation_enabled before assuming a goal can move hardware; L0 always retains route, stabilization, watchdog, and device authority."
+                "instructions": "SOMA cognition tools are routed to the local L0 owner. capture_view observes the robot camera; observe_host_screen observes the Mac display, and they are never interchangeable. control_host_computer performs only one immediate explicit administrator input action. Longer host work belongs to delegate_hermes_task. L0 retains participant, privacy, motor, and host-input authority."
             ], id: id)
         case "notifications/initialized", "notifications/cancelled":
             return
@@ -554,6 +558,31 @@ private final class EmbodimentMCPServer {
                 snapshot: snapshot,
                 activityOverview: .init(robotBody: snapshot, delegatedTasks: activities)
             )
+        case "observe_host_screen":
+            guard toolArguments.isEmpty else {
+                throw ServerFailure.invalidArguments("observe_host_screen takes no semantic arguments")
+            }
+            return try EmbodimentShadowSocketClient.send(
+                .init(
+                    kind: .hostComputer,
+                    cognitiveAuthorizationBasis: .explicitRequest,
+                    hostComputer: .init(operation: .observeScreen),
+                    sessionAuthorization: sessionAuthorization
+                ),
+                socketURL: socketURL
+            )
+        case "control_host_computer":
+            let value: HostComputerControlArguments = try decode(toolArguments)
+            try value.action.validate()
+            return try EmbodimentShadowSocketClient.send(
+                .init(
+                    kind: .hostComputer,
+                    cognitiveAuthorizationBasis: .explicitRequest,
+                    hostComputer: .init(operation: .performInput, input: value.action),
+                    sessionAuthorization: sessionAuthorization
+                ),
+                socketURL: socketURL
+            )
         case "get_view_capture":
             let value: ViewResultArguments = try decode(toolArguments)
             return try EmbodimentShadowSocketClient.send(
@@ -691,7 +720,12 @@ private final class EmbodimentMCPServer {
         case "register_semantic_target", "remove_semantic_target", "set_attention_policy",
              "track_target", "orient_to", "set_exploration_policy", "capture_view",
              "set_camera_optical_zoom", "set_audio_capture_mode", "set_audio_input_gain", "set_camera_white_balance", "set_camera_exposure_lock", "set_camera_focus", "set_camera_absolute_exposure", "set_camera_face_priority", "set_camera_anti_flicker", "set_camera_image_tuning", "set_native_human_tracking_policy", "set_camera_field_of_view", "express_gimbal", "release_embodiment":
-            let request = try embodimentRequest(for: name, arguments: toolArguments)
+            var authorizedArguments = toolArguments
+            authorizedArguments["control"] = trustedEmbodimentControl(
+                toolName: name,
+                intent: cognitiveIntent
+            )
+            let request = try embodimentRequest(for: name, arguments: authorizedArguments)
             let initial = try EmbodimentShadowSocketClient.send(
                 .init(
                     kind: .submit,
@@ -701,7 +735,7 @@ private final class EmbodimentMCPServer {
                 socketURL: socketURL
             )
             guard name == "capture_view", initial.ok else { return initial }
-            let capture: CaptureArguments = try decode(toolArguments)
+            let capture: CaptureArguments = try decode(authorizedArguments)
             guard capture.goal.requestsCurrentFrame || initial.snapshot?.physicalActuationEnabled == true else {
                 return EmbodimentIPCReply(
                     ok: false,
@@ -734,6 +768,35 @@ private final class EmbodimentMCPServer {
                 reply.error ?? "cognitive authorization is unavailable"
             )
         }
+    }
+
+    /// The model selects a semantic goal, while the trusted local gateway owns
+    /// source identity, priority, and lease bounds before L0 arbitration.
+    private func trustedEmbodimentControl(
+        toolName: String,
+        intent: L2CognitiveToolIntent
+    ) -> [String: Any] {
+        let leaseMilliseconds: UInt64
+        switch toolName {
+        case "track_target", "set_attention_policy", "set_exploration_policy":
+            leaseMilliseconds = 120_000
+        case "orient_to", "capture_view":
+            leaseMilliseconds = 15_000
+        case "express_gimbal":
+            leaseMilliseconds = 3_000
+        case "release_embodiment":
+            leaseMilliseconds = 1
+        default:
+            leaseMilliseconds = 10_000
+        }
+        return [
+            "source_layer": CognitiveControlLayer.l2.rawValue,
+            "owner_id": "l2:\(intent.goalEpisodeID.uuidString.lowercased())",
+            "priority": 90,
+            "lease_ms": leaseMilliseconds,
+            "reason": String(intent.purpose.prefix(240)),
+            "evidence_ids": Array(intent.evidenceIDs.prefix(16)).map { String($0.prefix(128)) },
+        ]
     }
 
     private func embodimentRequest(
@@ -1010,6 +1073,12 @@ private final class EmbodimentMCPServer {
                 : "The participant declined the pending Hermes report."
         case "cancel_hermes_task":
             return "The Hermes agent task was cancelled."
+        case "observe_host_screen":
+            return reply.hostComputer?.screen == nil
+                ? "The current host screen could not be observed."
+                : "A short-lived current host-screen image was acquired."
+        case "control_host_computer":
+            return "One explicit administrator host-input action completed."
         default:
             if let reason = reply.decision?.reason, !reason.isEmpty {
                 return "The embodied cognitive action completed: \(bounded(reason))"
@@ -1075,6 +1144,10 @@ private final class EmbodimentMCPServer {
             if let overview = reply.activityOverview {
                 projected["activity_overview"] = try? jsonObject(overview)
             }
+        case "observe_host_screen", "control_host_computer":
+            if let hostComputer = reply.hostComputer {
+                projected["host_computer"] = try? jsonObject(hostComputer)
+            }
         case "get_view_capture":
             if let resource = reply.viewResource { projected["view_resource"] = try? jsonObject(resource) }
         case "list_present_people", "list_identity_registry":
@@ -1112,6 +1185,17 @@ private final class EmbodimentMCPServer {
                 "name": "SOMA view \(resource.requestID)",
                 "uri": URL(fileURLWithPath: imagePath).absoluteString,
                 "mimeType": mimeType,
+            ])
+        }
+        if let screen = reply.hostComputer?.screen {
+            if let image = imageContent(path: screen.imagePath, mimeType: screen.mimeType) {
+                content.append(image)
+            }
+            content.append([
+                "type": "resource_link",
+                "name": "Current host screen",
+                "uri": URL(fileURLWithPath: screen.imagePath).absoluteString,
+                "mimeType": screen.mimeType,
             ])
         }
         return [
@@ -1180,6 +1264,8 @@ private final class EmbodimentMCPServer {
             "end_conversation",
             "get_robot_body_state",
             "get_activity_overview",
+            "observe_host_screen",
+            "control_host_computer",
             "list_scene_entities",
             "get_spatial_map",
             "get_view_capture",
@@ -1233,6 +1319,7 @@ private final class EmbodimentMCPServer {
 
     private func toolDefinitions() -> [[String: Any]] {
         embodimentStateTools()
+            + hostComputerTools()
             + conversationTools()
             + identityTools()
             + personContextTools()
@@ -1250,6 +1337,24 @@ private final class EmbodimentMCPServer {
             tool("get_view_capture", "Read one short-lived capture result by request ID.", objectSchema([
                 "request_id": stringSchema(maxLength: 96),
             ], required: ["request_id"]), readOnly: true),
+        ]
+    }
+
+    private func hostComputerTools() -> [[String: Any]] {
+        [
+            tool(
+                "observe_host_screen",
+                "Administrator-only: capture the Mac's current main display as a short-lived image after an explicit request to inspect what is on screen. This is not the OBSBOT camera. Use it before coordinate input and use returned pixel/coordinate dimensions to reason about the display.",
+                objectSchema([:], required: []),
+                readOnly: true
+            ),
+            tool(
+                "control_host_computer",
+                "Administrator-only: perform exactly one immediate pointer, scroll, text, or supported-key action on the Mac after an explicit request. Observe the current screen first when coordinates matter. Use Hermes instead for shell, files, repositories, research, services, or multi-step background work.",
+                objectSchema([
+                    "action": hostComputerActionSchema(),
+                ], required: ["action"])
+            ),
         ]
     }
 
@@ -1362,88 +1467,66 @@ private final class EmbodimentMCPServer {
     private func embodimentControlTools() -> [[String: Any]] {
         [
             tool("register_semantic_target", "Register a stable semantic target label or visual query with L0.", objectSchema([
-                "control": controlSchema(),
                 "registration": registrationSchema(),
-            ], required: ["control", "registration"])),
+            ], required: ["registration"])),
             tool("remove_semantic_target", "Remove a semantic target owned by the caller.", objectSchema([
-                "control": controlSchema(),
                 "target_reference": stringSchema(maxLength: 96),
-            ], required: ["control", "target_reference"])),
+            ], required: ["target_reference"])),
             tool("set_attention_policy", "Set probabilistic target priors, commitment, novelty, habituation, and dwell policy.", objectSchema([
-                "control": controlSchema(),
                 "policy": attentionPolicySchema(),
-            ], required: ["control", "policy"])),
+            ], required: ["policy"])),
             tool("track_target", "Lease tracking of one registered, scene-grounded semantic target through L0.", objectSchema([
-                "control": controlSchema(),
                 "goal": trackGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("orient_to", "Lease orientation toward a gimbal-home-relative spherical bearing through L0.", objectSchema([
-                "control": controlSchema(),
                 "goal": orientGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_exploration_policy", "Lease an exploration distribution over regions, bearings, tempo, dwell, novelty, and continuity.", objectSchema([
-                "control": controlSchema(),
                 "policy": explorationPolicySchema(),
-            ], required: ["control", "policy"])),
+            ], required: ["policy"])),
             tool("capture_view", "Capture a view and return it as MCP image content plus a short-lived local resource link. Use goal.current_frame=true for the immediate current camera frame without moving the gimbal; use target_reference or bearing only when a reframed view is needed.", objectSchema([
-                "control": controlSchema(),
                 "goal": captureGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_optical_zoom", "Set a physical camera zoom factor for a concrete detail-observation goal. L0 verifies the active device's reported factor and updates spatial projection before using later frames. Use 1.0 to restore the wide view.", objectSchema([
-                "control": controlSchema(),
                 "goal": opticalZoomGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_audio_capture_mode", "Choose the physical microphone capture mode for a concrete listening task. spatial_stereo preserves sound-direction evidence; conversation_front prioritizes a person already in front of the camera. L0 verifies the selected device mode.", objectSchema([
-                "control": controlSchema(),
                 "goal": audioCaptureModeGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_audio_input_gain", "Set microphone input gain for a specific listening task. This changes input level without changing spatial capture mode or moving the gimbal. L0 verifies firmware readback.", objectSchema([
-                "control": controlSchema(),
                 "goal": audioInputGainGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_white_balance", "Set camera white balance for a concrete visual task. auto retains adaptive color; manual locks a Kelvin temperature for stable repeated observations. L0 verifies the firmware-reported state before accepting later visual evidence.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraWhiteBalanceGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_exposure_lock", "Hold the camera's current automatic exposure for a stable visual observation, or release it back to automatic exposure. This does not take a gimbal lease; L0 verifies the firmware-reported setting.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraExposureLockGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_focus", "Set automatic focus or one explicit manual focal position for a bounded close inspection. This does not move the gimbal; L0 verifies the firmware-reported mode and position.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraFocusGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_absolute_exposure", "Return exposure to automatic mode or set one measured firmware shutter code for a specific visual task. L0 reads the active camera's permitted code range before applying it.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraAbsoluteExposureGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_face_priority", "Enable or disable the camera firmware's face-priority autofocus and auto-exposure. This does not select a person or move the gimbal; L0 verifies both firmware status bits.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraFacePriorityGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_anti_flicker", "Set the firmware anti-flicker mode for a visual observation. This does not move the gimbal; L0 verifies the reported camera setting.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraAntiFlickerGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_image_tuning", "Set one or more camera image controls as one verified transaction. If any requested firmware setting cannot be applied or read back, L0 restores every requested control to its original value.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraImageTuningGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_native_human_tracking_policy", "Configure Tiny 3 native human tracking response, retention, and adaptive or fixed pan/pitch gain. Fixed gains require both axes and disabled adaptive gains. It changes firmware tracking behavior but does not bypass L0 target selection, gimbal safety, or motor ownership.", objectSchema([
-                "control": controlSchema(),
                 "goal": nativeHumanTrackingPolicyGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("set_camera_field_of_view", "Set the camera's calibrated 86, 78, or 65 degree optical field of view for a concrete observation. L0 verifies firmware state and updates spherical projection before later visual evidence is interpreted.", objectSchema([
-                "control": controlSchema(),
                 "goal": cameraFieldOfViewGoalSchema(),
-            ], required: ["control", "goal"])),
+            ], required: ["goal"])),
             tool("express_gimbal", "Lease a bounded semantic social gimbal expression through L0.", objectSchema([
-                "control": controlSchema(),
                 "expression": ["type": "string", "enum": SocialGimbalExpression.allCases.map(\.rawValue)],
-            ], required: ["control", "expression"])),
-            tool("release_embodiment", "Release the caller's motor lease, attention policy, and registered targets.", objectSchema([
-                "control": controlSchema(),
-            ], required: ["control"])),
+            ], required: ["expression"])),
+            tool("release_embodiment", "Release this conversational goal's motor lease, attention policy, and registered targets.", objectSchema([:], required: [])),
         ]
     }
 
@@ -1488,18 +1571,6 @@ private final class EmbodimentMCPServer {
         return value
     }
 
-    private func controlSchema() -> [String: Any] {
-        objectSchema([
-            "request_id": stringSchema(maxLength: 96),
-            "source_layer": ["type": "string", "enum": CognitiveControlLayer.allCases.map(\.rawValue)],
-            "owner_id": stringSchema(maxLength: 96),
-            "priority": ["type": "integer", "minimum": 0, "maximum": 100],
-            "lease_ms": ["type": "integer", "minimum": 1, "maximum": 600_000],
-            "reason": stringSchema(maxLength: 240),
-            "evidence_ids": ["type": "array", "maxItems": 16, "items": stringSchema(maxLength: 128)],
-        ], required: ["source_layer", "owner_id", "priority", "lease_ms", "reason"])
-    }
-
     private func cognitiveIntentSchema() -> [String: Any] {
         objectSchema([
             "goal_episode_id": uuidSchema(),
@@ -1515,6 +1586,34 @@ private final class EmbodimentMCPServer {
                 "enum": L2CognitiveAuthorizationBasis.allCases.map(\.rawValue),
             ],
         ], required: ["goal_episode_id", "purpose", "expected_information_gain", "authorization_basis"])
+    }
+
+    private func hostComputerActionSchema() -> [String: Any] {
+        var schema = objectSchema([
+            "kind": ["type": "string", "enum": HostComputerInputKind.allCases.map(\.rawValue)],
+            "x": numberSchema(minimum: 0, maximum: 1),
+            "y": numberSchema(minimum: 0, maximum: 1),
+            "button": ["type": "string", "enum": HostComputerPointerButton.allCases.map(\.rawValue)],
+            "delta_x": ["type": "integer", "minimum": -2_000, "maximum": 2_000],
+            "delta_y": ["type": "integer", "minimum": -2_000, "maximum": 2_000],
+            "text": stringSchema(maxLength: 1_024),
+            "key": ["type": "string", "enum": HostComputerKey.allCases.map(\.rawValue)],
+            "modifiers": [
+                "type": "array",
+                "maxItems": 5,
+                "uniqueItems": true,
+                "items": ["type": "string", "enum": HostComputerKeyModifier.allCases.map(\.rawValue)],
+            ],
+        ], required: ["kind"])
+        schema["oneOf"] = [
+            ["properties": ["kind": ["const": HostComputerInputKind.movePointer.rawValue]], "required": ["x", "y"]],
+            ["properties": ["kind": ["const": HostComputerInputKind.click.rawValue]], "required": ["x", "y"]],
+            ["properties": ["kind": ["const": HostComputerInputKind.doubleClick.rawValue]], "required": ["x", "y"]],
+            ["properties": ["kind": ["const": HostComputerInputKind.scroll.rawValue]], "anyOf": [["required": ["delta_x"]], ["required": ["delta_y"]]]],
+            ["properties": ["kind": ["const": HostComputerInputKind.typeText.rawValue]], "required": ["text"]],
+            ["properties": ["kind": ["const": HostComputerInputKind.pressKey.rawValue]], "required": ["key"]],
+        ]
+        return schema
     }
 
     private func registrationSchema() -> [String: Any] {

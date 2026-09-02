@@ -1,5 +1,29 @@
 import Foundation
 
+public enum SOMACameraVerticalPlacement: String, Codable, CaseIterable, Equatable, Sendable {
+    case belowEyeLevel = "below_eye_level"
+    case eyeLevel = "eye_level"
+    case aboveEyeLevel = "above_eye_level"
+
+    /// Expected signed vertical pupil displacement for a person looking at the
+    /// lens. Vision coordinates are positive toward the upper eyelid.
+    public var expectedDirectPupilOffsetY: Double {
+        switch self {
+        case .belowEyeLevel: -0.10
+        case .eyeLevel: 0
+        case .aboveEyeLevel: 0.10
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .belowEyeLevel: "Below eye level"
+        case .eyeLevel: "At eye level"
+        case .aboveEyeLevel: "Above eye level"
+        }
+    }
+}
+
 /// Layer (L0/L2/L3) and Ollama configuration that is managed as a plain
 /// `.env` file so it can be sourced by the launch agent shell script before
 /// the runtime binary starts. Keeping these as environment variables means the
@@ -79,6 +103,9 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
     /// 1.0 uses the classifier's base limits. Lower = stricter (pupil must be
     /// more centered); higher = more lenient. Defaults to 0.9.
     public var l0EyeContactPupilThreshold: Double
+    /// Lens position relative to the participant's eyes. This shifts the
+    /// expected vertical pupil ray without weakening downward-gaze rejection.
+    public var l0CameraVerticalPlacement: SOMACameraVerticalPlacement
     /// Minimum confidence (0...1) for the on-device YOLO object detector to
     /// report an object. Higher = fewer false positives (e.g. phantom
     /// toothbrushes), lower = more recall. Defaults to 0.5.
@@ -121,6 +148,7 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
         l05Enabled: Bool = true,
         l0EyeContactFreshnessMilliseconds: Double = SOMAEnvSettings.defaultEyeContactFreshnessMilliseconds,
         l0EyeContactPupilThreshold: Double = 0.9,
+        l0CameraVerticalPlacement: SOMACameraVerticalPlacement = .eyeLevel,
         l0YoloConfidenceThreshold: Double = 0.5,
         memoryShortTermRetentionHours: Double = 24,
         l2ProactiveOpeningsEnabled: Bool = true,
@@ -146,6 +174,7 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
         self.l05Enabled = l05Enabled
         self.l0EyeContactFreshnessMilliseconds = l0EyeContactFreshnessMilliseconds
         self.l0EyeContactPupilThreshold = l0EyeContactPupilThreshold
+        self.l0CameraVerticalPlacement = l0CameraVerticalPlacement
         self.l0YoloConfidenceThreshold = l0YoloConfidenceThreshold
         self.memoryShortTermRetentionHours = memoryShortTermRetentionHours
         self.l2ProactiveOpeningsEnabled = l2ProactiveOpeningsEnabled
@@ -251,6 +280,7 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
             "SOMA_ENABLE_L05_VLM=\(l05Enabled ? "1" : "0")",
             "SOMA_L0_EYE_CONTACT_FRESHNESS_MS=\(String(format: "%g", l0EyeContactFreshnessMilliseconds))",
             "SOMA_L0_EYE_CONTACT_PUPIL_THRESHOLD=\(String(format: "%g", l0EyeContactPupilThreshold))",
+            "SOMA_L0_CAMERA_VERTICAL_PLACEMENT=\(l0CameraVerticalPlacement.rawValue)",
             "SOMA_YOLO_CONFIDENCE_THRESHOLD=\(String(format: "%g", l0YoloConfidenceThreshold))",
             "SOMA_MEMORY_SHORT_TERM_RETENTION_HOURS=\(String(format: "%g", memoryShortTermRetentionHours))",
             "SOMA_L2_PROACTIVE_OPENINGS=\(l2ProactiveOpeningsEnabled ? "true" : "false")",
@@ -279,6 +309,7 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
         case l05Enabled
         case l0EyeContactFreshnessMilliseconds
         case l0EyeContactPupilThreshold
+        case l0CameraVerticalPlacement
         case l0YoloConfidenceThreshold
         case memoryShortTermRetentionHours
         case l2ProactiveOpeningsEnabled
@@ -307,6 +338,10 @@ public struct SOMAEnvSettings: Codable, Equatable, Sendable {
         l05Enabled = try values.decodeIfPresent(Bool.self, forKey: .l05Enabled) ?? true
         l0EyeContactFreshnessMilliseconds = try values.decodeIfPresent(Double.self, forKey: .l0EyeContactFreshnessMilliseconds) ?? Self.defaultEyeContactFreshnessMilliseconds
         l0EyeContactPupilThreshold = try values.decodeIfPresent(Double.self, forKey: .l0EyeContactPupilThreshold) ?? 0.9
+        l0CameraVerticalPlacement = try values.decodeIfPresent(
+            SOMACameraVerticalPlacement.self,
+            forKey: .l0CameraVerticalPlacement
+        ) ?? .eyeLevel
         l0YoloConfidenceThreshold = try values.decodeIfPresent(Double.self, forKey: .l0YoloConfidenceThreshold) ?? 0.5
         memoryShortTermRetentionHours = try values.decodeIfPresent(Double.self, forKey: .memoryShortTermRetentionHours) ?? 24
         l2ProactiveOpeningsEnabled = try values.decodeIfPresent(Bool.self, forKey: .l2ProactiveOpeningsEnabled) ?? true
@@ -401,6 +436,9 @@ public struct SOMAEnvStore: Sendable {
                 default: SOMAEnvSettings.defaultEyeContactFreshnessMilliseconds
             ),
             l0EyeContactPupilThreshold: try doubleValue(values["SOMA_L0_EYE_CONTACT_PUPIL_THRESHOLD"], key: "SOMA_L0_EYE_CONTACT_PUPIL_THRESHOLD", default: 0.9),
+            l0CameraVerticalPlacement: try cameraVerticalPlacement(
+                values["SOMA_L0_CAMERA_VERTICAL_PLACEMENT"]
+            ),
             l0YoloConfidenceThreshold: try doubleValue(values["SOMA_YOLO_CONFIDENCE_THRESHOLD"], key: "SOMA_YOLO_CONFIDENCE_THRESHOLD", default: 0.5),
             memoryShortTermRetentionHours: try doubleValue(values["SOMA_MEMORY_SHORT_TERM_RETENTION_HOURS"], key: "SOMA_MEMORY_SHORT_TERM_RETENTION_HOURS", default: 24),
             l2ProactiveOpeningsEnabled: try boolValue(values["SOMA_L2_PROACTIVE_OPENINGS"], key: "SOMA_L2_PROACTIVE_OPENINGS", default: true),
@@ -495,5 +533,15 @@ public struct SOMAEnvStore: Sendable {
             throw SOMAEnvStoreError.invalidValue("\(key) must be a finite number")
         }
         return value
+    }
+
+    private func cameraVerticalPlacement(_ raw: String?) throws -> SOMACameraVerticalPlacement {
+        guard let raw else { return .eyeLevel }
+        guard let placement = SOMACameraVerticalPlacement(rawValue: raw) else {
+            throw SOMAEnvStoreError.invalidValue(
+                "SOMA_L0_CAMERA_VERTICAL_PLACEMENT must be below_eye_level, eye_level, or above_eye_level"
+            )
+        }
+        return placement
     }
 }

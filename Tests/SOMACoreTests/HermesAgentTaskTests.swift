@@ -83,12 +83,12 @@ final class HermesAgentTaskTests: XCTestCase {
 
     func testTaskRoutingSeparatesHostWorkFromRobotEmbodiment() {
         let enabled = L2TaskRoutingPolicy.instruction(hermesEnabled: true)
-        XCTAssertTrue(enabled.contains("host computer"))
+        XCTAssertTrue(enabled.contains("visible Mac UI"))
         XCTAssertTrue(enabled.contains("delegate_hermes_task exactly once"))
         XCTAssertTrue(enabled.contains("keep listening and converse normally"))
         XCTAssertTrue(enabled.contains("acknowledge aloud"))
         XCTAssertTrue(enabled.contains("Do not read the task UUID aloud"))
-        XCTAssertTrue(enabled.contains("Do not substitute get_robot_body_state"))
+        XCTAssertTrue(enabled.contains("Do not substitute screen pixels or get_robot_body_state"))
         XCTAssertTrue(enabled.contains("use get_activity_overview"))
         XCTAssertTrue(L2TaskRoutingPolicy.embodimentStateToolDescription.contains("not the host Mac"))
         XCTAssertTrue(L2TaskRoutingPolicy.hermesDelegationToolDescription.contains("while the voice conversation remains responsive"))

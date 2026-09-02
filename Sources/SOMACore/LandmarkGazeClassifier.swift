@@ -54,6 +54,7 @@ public enum LandmarkGazeClassifier {
         leftEye: EyeLandmarkGeometry,
         rightEye: EyeLandmarkGeometry,
         pupilCenteringScale: Double = 1,
+        expectedDirectPupilOffsetY: Double = 0,
         minimumMeanEyeAperture: Double = 0.27,
         minimumMeanSignedPupilOffsetY: Double = -0.05
     ) -> VisualGazeEvidence {
@@ -63,6 +64,7 @@ public enum LandmarkGazeClassifier {
             leftEye: leftEye,
             rightEye: rightEye,
             pupilCenteringScale: pupilCenteringScale,
+            expectedDirectPupilOffsetY: expectedDirectPupilOffsetY,
             minimumMeanEyeAperture: minimumMeanEyeAperture,
             minimumMeanSignedPupilOffsetY: minimumMeanSignedPupilOffsetY
         ).evidence
@@ -74,6 +76,7 @@ public enum LandmarkGazeClassifier {
         leftEye: EyeLandmarkGeometry,
         rightEye: EyeLandmarkGeometry,
         pupilCenteringScale: Double = 1,
+        expectedDirectPupilOffsetY: Double = 0,
         minimumMeanEyeAperture: Double = 0.27,
         minimumMeanSignedPupilOffsetY: Double = -0.05
     ) -> LandmarkGazeAssessment {
@@ -87,11 +90,13 @@ public enum LandmarkGazeClassifier {
             rightEye.signedPupilOffsetY,
             rightEye.apertureRatio,
             pupilCenteringScale,
+            expectedDirectPupilOffsetY,
             minimumMeanEyeAperture,
             minimumMeanSignedPupilOffsetY,
         ]
         guard values.allSatisfy(\.isFinite),
               pupilCenteringScale > 0,
+              (-0.35 ... 0.35).contains(expectedDirectPupilOffsetY),
               minimumMeanEyeAperture > 0,
               let yaw,
               yaw.isFinite else {
@@ -109,7 +114,7 @@ public enum LandmarkGazeClassifier {
         let verticalLimit = 0.50 * pupilCenteringScale
         let pupilIsCentered = [leftEye, rightEye].allSatisfy { eye in
             eye.pupilOffsetX <= horizontalLimit
-                && eye.pupilOffsetY <= verticalLimit
+                && abs(eye.signedPupilOffsetY - expectedDirectPupilOffsetY) <= verticalLimit
         }
         guard pupilIsCentered else {
             return LandmarkGazeAssessment(evidence: .averted, directConfidence: 0)
@@ -123,7 +128,8 @@ public enum LandmarkGazeClassifier {
         let meanSignedPupilOffsetY = (
             leftEye.signedPupilOffsetY + rightEye.signedPupilOffsetY
         ) / 2
-        guard meanSignedPupilOffsetY >= minimumMeanSignedPupilOffsetY else {
+        let meanVerticalResidual = meanSignedPupilOffsetY - expectedDirectPupilOffsetY
+        guard meanVerticalResidual >= minimumMeanSignedPupilOffsetY else {
             return LandmarkGazeAssessment(evidence: .averted, directConfidence: 0)
         }
 
@@ -135,7 +141,10 @@ public enum LandmarkGazeClassifier {
         }
 
         let maximumHorizontalOffset = max(leftEye.pupilOffsetX, rightEye.pupilOffsetX)
-        let maximumVerticalOffset = max(leftEye.pupilOffsetY, rightEye.pupilOffsetY)
+        let maximumVerticalOffset = max(
+            abs(leftEye.signedPupilOffsetY - expectedDirectPupilOffsetY),
+            abs(rightEye.signedPupilOffsetY - expectedDirectPupilOffsetY)
+        )
         let horizontalSupport = max(0, 1 - maximumHorizontalOffset / horizontalLimit)
         let verticalSupport = max(0, 1 - maximumVerticalOffset / verticalLimit)
         let pupilSupport = horizontalSupport * 0.75 + verticalSupport * 0.25

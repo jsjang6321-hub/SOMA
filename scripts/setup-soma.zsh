@@ -318,4 +318,4 @@ if [[ -n "$soma_runtime_pid" ]]; then
 else
   print -r -- 'SOMA setup complete; hardware activation is deferred.'
 fi
-print -r -- 'If macOS prompts, grant Camera, Microphone, Speech Recognition, and Accessibility access.'
+print -r -- 'If macOS prompts, grant Camera, Microphone, Speech Recognition, Accessibility, and Screen Recording access.'

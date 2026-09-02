@@ -17,6 +17,7 @@ final class SOMAEnvSettingsTests: XCTestCase {
             l1ReasoningCadenceSeconds: 180,
             l1CuriosityCollectionEnabled: true,
             l1CollectionIntervalHours: 6,
+            l0CameraVerticalPlacement: .belowEyeLevel,
             l2ProactiveOpeningsEnabled: false
         )
         let store = SOMAEnvStore(fileURL: url)
@@ -36,6 +37,7 @@ final class SOMAEnvSettingsTests: XCTestCase {
             SOMAEnvSettings.defaultEyeContactFreshnessMilliseconds
         )
         XCTAssertEqual(defaults.l0EyeContactPupilThreshold, 0.9)
+        XCTAssertEqual(defaults.l0CameraVerticalPlacement, .eyeLevel)
     }
 
     func testZeroSpokenOpeningTendencyRoundTripsWithoutBecomingDefault() throws {
@@ -123,6 +125,7 @@ final class SOMAEnvSettingsTests: XCTestCase {
             "SOMA_L0_TRACKING_ENABLED=perhaps\n",
             "SOMA_L1_REASONING_CADENCE_SECONDS=5\n",
             "SOMA_L0_EYE_CONTACT_FRESHNESS_MS=not-a-number\n",
+            "SOMA_L0_CAMERA_VERTICAL_PLACEMENT=under_the_desk\n",
             "SOMA_L2_CODEX_SANDBOX=unrestricted\n",
         ] {
             try content.write(to: url, atomically: true, encoding: .utf8)

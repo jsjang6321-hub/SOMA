@@ -19,6 +19,7 @@ if [[ ! -f "$soma_lock" ]]; then
 fi
 source "$soma_lock"
 source "$soma_root/scripts/lib/soma-model-contracts.zsh"
+source "$soma_root/scripts/lib/soma-codex-locator.zsh"
 autoload -Uz is-at-least
 
 soma_install_scripts=(
@@ -321,13 +322,7 @@ if [[ "$soma_mode" == "--runtime" ]]; then
   fi
 
   if [[ "${SOMA_ENABLE_L2_LIVE_VOICE:-1}" == 1 ]]; then
-    soma_codex=${SOMA_CODEX_BINARY:-}
-    if [[ -z "$soma_codex" && -x /Applications/Codex.app/Contents/Resources/codex ]]; then
-      soma_codex=/Applications/Codex.app/Contents/Resources/codex
-    fi
-    if [[ -z "$soma_codex" ]]; then
-      soma_codex=$(command -v codex 2>/dev/null || true)
-    fi
+    soma_codex=$(soma_find_codex 2>/dev/null || true)
     soma_codex_login=''
     if [[ -n "$soma_codex" && -x "$soma_codex" ]]; then
       soma_codex_login=$("$soma_codex" login status 2>&1 || true)

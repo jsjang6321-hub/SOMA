@@ -80,7 +80,7 @@ final class AppServerDailyWorldMemoryCollector: @unchecked Sendable {
     }
 
     private func launch(for day: String, at date: Date) {
-        guard let executable = Self.codexURL() else {
+        guard let executable = SOMACodexLocator.locate()?.executableURL else {
             onHealth("unavailable", "reason=codex_app_server_not_found")
             return
         }
@@ -432,23 +432,4 @@ final class AppServerDailyWorldMemoryCollector: @unchecked Sendable {
         return formatter.string(from: date)
     }
 
-    private static func codexURL() -> URL? {
-        if let override = ProcessInfo.processInfo.environment["SOMA_CODEX_BINARY"],
-           FileManager.default.isExecutableFile(atPath: override) {
-            return URL(fileURLWithPath: override)
-        }
-        let applicationURL = URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex")
-        if FileManager.default.isExecutableFile(atPath: applicationURL.path) {
-            return applicationURL
-        }
-        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for component in path.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(component), isDirectory: true)
-                .appendingPathComponent("codex")
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
-    }
 }

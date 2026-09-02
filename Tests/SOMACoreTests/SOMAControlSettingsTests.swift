@@ -41,7 +41,7 @@ final class SOMAControlSettingsTests: XCTestCase {
         )
     }
 
-    func testRealtimeVoiceEyeContactPerTurnSettingDefaultsOffForExistingSettings() throws {
+    func testRealtimeVoiceSafetySettingsDefaultOnForExistingSettings() throws {
         let legacy = """
         {
           "schemaVersion": 8,
@@ -53,11 +53,61 @@ final class SOMAControlSettingsTests: XCTestCase {
             SOMAControlSettings.self,
             from: Data(legacy.utf8)
         )
-        XCTAssertFalse(migrated.realtimeVoiceRequiresEyeContactForEveryTurn)
+        XCTAssertTrue(migrated.realtimeVoiceRequiresEyeContactForEveryTurn)
+        XCTAssertTrue(migrated.administratorOnlyConversations)
         XCTAssertEqual(migrated.realtimeVoiceSilenceTimeoutSeconds, 60)
         XCTAssertTrue(migrated.hermesAgentDelegationEnabled)
         XCTAssertNil(migrated.hermesAgentWorkspace)
         XCTAssertEqual(migrated.schemaVersion, SOMAControlSettings.currentSchemaVersion)
+    }
+
+    func testDiscordSettingsPersistWithoutEmbeddingBotToken() throws {
+        let settings = SOMAControlSettings(
+            discord: .init(
+                enabled: true,
+                channelID: "123456789012345678",
+                labmanagerBotUserID: "987654321098765432",
+                labmanagerRoleID: "876543210987654321",
+                invocationMention: .managedRole,
+                forwardAdministratorSpeech: true,
+                readLabmanagerRepliesAloud: true,
+                responseTimeoutSeconds: 120
+            )
+        )
+        let data = try JSONEncoder().encode(settings)
+        let restored = try JSONDecoder().decode(SOMAControlSettings.self, from: data)
+
+        XCTAssertEqual(restored.discord, settings.discord)
+        XCTAssertTrue(restored.discord.isConfigured)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("bot-token"))
+    }
+
+    func testDiscordConversationFormattingMentionsOnlyAllowlistedBotAndSanitizesSpeech() {
+        let text = SOMADiscordConversationClient.normalizedOutboundText(
+            "  회의 내용을 정리해 줘  ",
+            settings: .init(
+                enabled: true,
+                channelID: "123456789012345678",
+                labmanagerBotUserID: "987654321098765432"
+            ),
+            conversationID: "thread/unsafe 42",
+            correlationID: "vc-0123456789ab"
+        )
+        XCTAssertEqual(
+            text,
+            "<@987654321098765432> 🎙️ voice [voice-corr:vc-0123456789ab] [SOMA session:threadunsafe42] 회의 내용을 정리해 줘"
+        )
+        XCTAssertEqual(
+            SOMADiscordConversationClient.spokenReply(
+                from: "<@123456789012345678> 결과는 `완료`입니다. [voice-corr:vc-0123456789ab] https://example.com/x"
+            ),
+            "결과는 완료입니다. 링크"
+        )
+        XCTAssertNil(SOMADiscordSettings.normalizedSnowflake("../../secret"))
+        XCTAssertFalse(SOMADiscordConversationClient.shouldForwardTranscript(
+            "SOMA_DISCORD_LABMANAGER_REPLY\nreply: do not loop"
+        ))
+        XCTAssertTrue(SOMADiscordConversationClient.shouldForwardTranscript("실제 사용자 발화"))
     }
 
     func testRealtimeVoiceSilenceTimeoutIsPersistedAndBounded() throws {

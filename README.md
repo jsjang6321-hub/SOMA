@@ -195,6 +195,18 @@ and result fingerprint return to the mental workspace. That closes the
 perception–thought–action loop without duplicating successful equivalent calls
 or persisting raw tool payloads.
 
+The host display is a separate sensor from the OBSBOT camera. After an explicit
+administrator request, L2 can acquire one short-lived main-display image and
+perform a bounded foreground UI action, one pointer, scroll, text, or
+supported-key action per call. These are
+two high-level MCP tools rather than separate mouse and keyboard tool families.
+They require the current administrator capability and a fresh participant turn;
+screen pixels and typed text are not written to the cognitive trace. Multi-step
+computer work, shell access, files, repositories, services, and research remain
+Hermes tasks so the live conversation does not become an unbounded desktop
+automation loop. This channel remains available when gimbal motion is disabled;
+physical camera authority is negotiated separately.
+
 Hermes is the worker for external jobs that can proceed independently of the
 spoken exchange. When delegation is enabled, L2 separates direct conversation
 and SOMA embodiment from explicit administrator work involving the host Mac,
@@ -226,6 +238,34 @@ anchors the stored worker session to its selected workspace so it remains under
 the correct project instead of falling into Hermes Desktop's synthetic Home
 bucket.
 
+### Discord and `@Labmanager`
+
+The Control Center can connect an existing Discord bot to one explicitly
+allowlisted channel or thread. After L0 has attributed a finalized spoken turn
+to the enrolled administrator, SOMA posts that transcript to the configured
+channel and mentions only the configured Labmanager bot user or managed role.
+A reply is accepted only when its channel ID and bot author ID both match the saved
+allowlist and it echoes the request's one-time `voice-corr` marker. The existing
+Labmanager deployment uses a direct bot-user mention; a managed-role mention is
+also selectable for other deployments. When the originating Live Voice session
+is still active, SOMA lets its primary local response and playback finish first.
+The reply is then bound to the originating user turn together with the first
+local answer and returned as a controller envelope. L2 stays silent when the
+reply is merely redundant; otherwise it gives one concise follow-up that adds
+new information, explicitly corrects the earlier answer, or reports the actual
+accepted, completed, or failed mission state. Discord text is never treated as
+participant authorization and cannot authorize tools or external work.
+
+The Discord bot token is sealed with ChaChaPoly in SOMA's owner-only local
+credential store rather than `settings.json`, the repository, process arguments,
+environment variables, or runtime traces. This follows the same unattended-worker
+boundary as SOMA's other encrypted local stores and avoids GUI authorization
+prompts during LaunchAgent startup. Enable Discord's Message Content Intent for
+the SOMA bot and grant only View Channel, Send Messages, and Read Message
+History in the selected channel. HTTP rate-limit responses are retried from
+Discord's returned delay instead of using a hard-coded request quota. Configure
+the bridge under **Control Center → Experience → Discord · @Labmanager**.
+
 ## Memory as continuity, not a transcript dump
 
 SOMA keeps several different forms of memory because an interaction has more
@@ -256,9 +296,13 @@ whole attention policy while keeping the physical executor local.
 | A fresh `capture_view` image or selected panorama data | Shape exploration regions, direction distributions, dwell, and tempo |
 | Hardware capability report | Set a verified camera observation control or native human-track response policy |
 
-Every mutating request includes an owner, evidence references, a priority, and
-a bounded lease. L0 rejects stale or ambiguous targets, expires finished goals,
-and resolves competing requests before anything reaches the USB control plane.
+The public model supplies semantic intent, not its own authority. The trusted
+local MCP gateway derives the L2 owner, evidence references, fixed priority,
+and bounded lease from the active cognitive goal before forwarding a request.
+This keeps repeated authorization fields out of the model-facing tool schemas
+and prevents the model from self-assigning motor priority. L0 then rejects stale
+or ambiguous targets, expires finished goals, and resolves competing requests
+before anything reaches the USB control plane.
 
 ## Presence is a communication channel
 
@@ -296,6 +340,9 @@ by default.
   explicit actions with confirmation.
 - L1 and L2 can express high-level embodied intent, but only L0 owns final
   motion safety and the physical stop path.
+- Discord forwarding is off by default and is restricted to finalized
+  administrator speech, one channel, and one response bot. Controller envelopes
+  are excluded from re-forwarding so two bots cannot create a response loop.
 
 See [COGNITIVE_ARCHITECTURE.md](COGNITIVE_ARCHITECTURE.md) for the detailed
 authority, memory, and privacy contracts.
@@ -323,6 +370,10 @@ scripts/setup-soma.zsh --full
 The installer first shows a guided readiness report for Xcode, Homebrew,
 Codex Live Voice, the connected camera, and possible OBSBOT Center contention.
 OBSBOT Center is not a dependency and should be closed if present.
+Codex discovery does not depend on the application display name: SOMA checks an
+explicit `SOMA_CODEX_BINARY`, the executable `PATH`, common CLI locations, and
+installed application bundles that embed `Contents/Resources/codex`. This covers
+both Codex- and ChatGPT-named desktop installations.
 
 `--full` provisions the optional L0.5 semantic helper and ArcFace identity
 model, enables the supported gimbal profiles, creates a machine-local persistent
@@ -404,11 +455,20 @@ full verification suite, then
 rebuilds the Swift and native helpers, signs a local app bundle,
 writes `com.soma.menu-bar` and `com.soma.reactive-l0` LaunchAgents, and starts or
 restarts them. macOS may then request Camera, Microphone, Speech Recognition,
-and Accessibility permissions. The installed runtime is intended for a local
+Accessibility, and Screen Recording permissions. Screen Recording is used only
+for an explicitly requested host-screen observation; Accessibility is used for
+an explicitly requested pointer or keyboard action. The installed runtime is intended for a local
 macOS user with the connected camera and—when Live Voice is enabled—a signed-in
 Codex installation. Motion stays disabled until `.env` explicitly enables it
 and the connected device has a valid calibration. Use `scripts/soma.zsh stop`,
 `start`, `restart`, or `status` for subsequent service control.
+
+Administrator enrollment captures the display name and face together, persists
+their shared entity ID, and restarts L0 so the encrypted profile is loaded
+immediately. If the lens is mounted above or below the participant's eyes, set
+**Camera height** under **L0 — Perception & attention** before judging eye-contact
+accuracy; the correction shifts the expected vertical eye ray while preserving
+the downward-gaze rejection boundary.
 </details>
 
 ## Repository map
@@ -418,7 +478,7 @@ and the connected device has a valid calibration. Use `scripts/soma.zsh stop`,
 | [`Sources/SOMACore`](Sources/SOMACore) | Cognition contracts, memory, identity, semantic embodiment leases, attention, and spatial models |
 | [`Sources/SOMASubconscious`](Sources/SOMASubconscious) | L0 capture/perception runtime, panorama worker, L1 situation stream, and local safety integration |
 | [`Sources/SOMANativeTracking`](Sources/SOMANativeTracking) | Product-gated open macOS UVC/XU control, native tracking, audio, and indicator bridge |
-| [`Sources/SOMAEmbodimentMCP`](Sources/SOMAEmbodimentMCP) | MCP server for embodiment and person-context operations |
+| [`Sources/SOMAEmbodimentMCP`](Sources/SOMAEmbodimentMCP) | MCP gateway for embodiment, person context, bounded host-screen observation, and immediate host input |
 | [`Sources/SOMALiveVoice`](Sources/SOMALiveVoice) | Account-backed Codex app-server Live Voice helper |
 | [`Sources/SOMAMenuBar`](Sources/SOMAMenuBar) | Native local settings, status, and diagnostics interface |
 | [`Tests/SOMACoreTests`](Tests/SOMACoreTests) | Contract and regression tests for cognition, memory, embodiment, and spatial behavior |

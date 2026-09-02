@@ -30,6 +30,7 @@ struct OllamaGenerateRequest: Encodable {
     let prompt: String
     let format: String
     let stream: Bool
+    let think = false
     let images: [String]?
     let options: Options
 
@@ -1050,6 +1051,7 @@ final class L1MemoryContextProvider: @unchecked Sendable {
             "model": ProcessInfo.processInfo.environment["SOMA_L1_MODEL"] ?? "gemma4:31b-cloud",
             "prompt": prompt,
             "stream": false,
+            "think": false,
             "format": "json",
             "options": ["temperature": 0.2, "num_predict": 360],
         ])
@@ -2175,6 +2177,7 @@ final class L1MemoryContextProvider: @unchecked Sendable {
             "model": ProcessInfo.processInfo.environment["SOMA_L1_MODEL"] ?? "gemma4:31b-cloud",
             "prompt": prompt,
             "stream": false,
+            "think": false,
             "format": "json",
             "options": ["temperature": 0.1, "num_predict": 160],
         ])

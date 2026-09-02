@@ -70,12 +70,8 @@ private struct Options {
         let codexURL: URL
         if let codexPath {
             codexURL = URL(fileURLWithPath: codexPath)
-        } else if FileManager.default.isExecutableFile(
-            atPath: "/Applications/Codex.app/Contents/Resources/codex"
-        ) {
-            codexURL = URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex")
-        } else if let discovered = executable(named: "codex") {
-            codexURL = discovered
+        } else if let discovered = SOMACodexLocator.locate() {
+            codexURL = discovered.executableURL
         } else {
             throw BridgeFailure.codexNotFound
         }
@@ -105,17 +101,6 @@ private struct Options {
         )
     }
 
-    private static func executable(named name: String) -> URL? {
-        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for component in path.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(component), isDirectory: true)
-                .appendingPathComponent(name)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
-    }
 }
 
 private final class BoundedPipeCollector: @unchecked Sendable {

@@ -88,6 +88,126 @@ final class CognitiveEmbodimentTests: XCTestCase {
         }
     }
 
+    func testHostComputerAuthorityIsAdministratorOnly() {
+        let store = SOMASessionCapabilityStore(lifetimeSeconds: 60)
+        let participant = store.issue(personEntityID: UUID(), authority: .participant)
+        let administrator = store.issue(personEntityID: UUID(), authority: .administrator)
+
+        if case let .failure(error) = store.authorize(token: participant, scope: .hostScreenObservation) {
+            XCTAssertEqual(error, .hostScreenObservationDenied)
+        } else {
+            XCTFail("participant observed the host screen")
+        }
+        if case let .failure(error) = store.authorize(token: participant, scope: .hostInputControl) {
+            XCTAssertEqual(error, .hostInputControlDenied)
+        } else {
+            XCTFail("participant controlled host input")
+        }
+        if case .failure = store.authorize(token: administrator, scope: .hostScreenObservation) {
+            XCTFail("administrator host-screen authority was denied")
+        }
+        if case .failure = store.authorize(token: administrator, scope: .hostInputControl) {
+            XCTFail("administrator host-input authority was denied")
+        }
+    }
+
+    func testHostComputerInputSchemaRejectsAmbiguousActions() throws {
+        XCTAssertNoThrow(try HostComputerInputAction(
+            kind: .click,
+            x: 0.25,
+            y: 0.75,
+            button: .left
+        ).validate())
+        XCTAssertNoThrow(try HostComputerInputAction(
+            kind: .pressKey,
+            key: .returnKey,
+            modifiers: [.command]
+        ).validate())
+        XCTAssertThrowsError(try HostComputerInputAction(kind: .click, x: 1.5, y: 0.5).validate())
+        XCTAssertThrowsError(try HostComputerInputAction(kind: .scroll, deltaY: 0).validate())
+        XCTAssertThrowsError(try HostComputerInputAction(
+            kind: .typeText,
+            text: "private",
+            modifiers: [.command]
+        ).validate())
+    }
+
+    func testHostComputerInputDecodingDefaultsOptionalModifiers() throws {
+        let action = try JSONDecoder().decode(
+            HostComputerInputAction.self,
+            from: Data(#"{"kind":"click","x":0.25,"y":0.75}"#.utf8)
+        )
+
+        XCTAssertEqual(action.kind, .click)
+        XCTAssertEqual(action.modifiers, [])
+        XCTAssertNoThrow(try action.validate())
+    }
+
+    func testHostComputerRequestRejectsInputOnScreenObservation() {
+        let request = HostComputerIPCRequest(
+            operation: .observeScreen,
+            input: .init(kind: .pressKey, key: .escape)
+        )
+
+        XCTAssertThrowsError(try request.validate())
+    }
+
+    func testHostComputerIPCRequiresExplicitCurrentAdministratorTurn() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("soma-host-ipc-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let socketURL = directory.appendingPathComponent("host.sock")
+        let store = SOMASessionCapabilityStore(lifetimeSeconds: 60)
+        let token = store.issue(personEntityID: UUID(), authority: .administrator)
+        let handled = LockedValue(false)
+        let server = EmbodimentShadowSocketServer(
+            socketURL: socketURL,
+            sessionAuthorizationProvider: { supplied, scope in
+                store.authorize(token: supplied, scope: scope).mapError { $0 as Error }
+            },
+            hostComputerProvider: { request in
+                handled.set(true)
+                return .success(.init(action: request.input.map {
+                    HostComputerActionReceipt(kind: $0.kind, performedAtNS: 1)
+                }))
+            }
+        )
+        try server.start()
+        defer {
+            server.stop()
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let request = HostComputerIPCRequest(
+            operation: .performInput,
+            input: .init(kind: .pressKey, key: .escape)
+        )
+        let withoutTurn = try EmbodimentShadowSocketClient.send(
+            .init(
+                kind: .hostComputer,
+                cognitiveAuthorizationBasis: .explicitRequest,
+                hostComputer: request,
+                sessionAuthorization: token
+            ),
+            socketURL: socketURL
+        )
+        XCTAssertFalse(withoutTurn.ok)
+        XCTAssertFalse(handled.value)
+
+        _ = store.observeParticipantTurn(token: token, active: true)
+        let accepted = try EmbodimentShadowSocketClient.send(
+            .init(
+                kind: .hostComputer,
+                cognitiveAuthorizationBasis: .explicitRequest,
+                hostComputer: request,
+                sessionAuthorization: token
+            ),
+            socketURL: socketURL
+        )
+        XCTAssertTrue(accepted.ok)
+        XCTAssertEqual(accepted.hostComputer?.action?.kind, .pressKey)
+        XCTAssertTrue(handled.value)
+    }
+
     func testExplicitCognitiveBasisRequiresCurrentParticipantTurn() {
         let start: UInt64 = 1_000_000_000
         let store = SOMASessionCapabilityStore(
@@ -647,8 +767,9 @@ final class CognitiveEmbodimentTests: XCTestCase {
                     proactiveContactPreference: .unknown,
                     rapport: nil,
                     facts: ["preferred_language": "zh-Hans"]
-                ))
-            }
+        ))
+    }
+
         )
         try server.start()
         defer {

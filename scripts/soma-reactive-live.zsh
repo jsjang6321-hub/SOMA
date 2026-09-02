@@ -23,10 +23,12 @@ mkdir -p \
   "$soma_runtime_root/actuator" \
   "$soma_runtime_root/ipc" \
   "$soma_runtime_root/views" \
+  "$soma_runtime_root/host-screen" \
   "$soma_runtime_root/panorama" \
   "$soma_runtime_root/launcher"
 chmod 700 "$soma_runtime_root/ipc"
 chmod 700 "$soma_runtime_root/views"
+chmod 700 "$soma_runtime_root/host-screen"
 
 # A crash can orphan the per-runtime App Server and its MCP children. They
 # retain stale session capabilities and contend for the same local embodiment
@@ -38,7 +40,7 @@ function soma_reclaim_orphaned_children() {
   soma_stale_pids=()
   while read -r soma_pid soma_parent soma_command; do
     [[ "$soma_pid" == <-> ]] || continue
-    if [[ "$soma_command" == "/Applications/Codex.app/Contents/Resources/codex app-server --listen ws://127.0.0.1:"* ]] \
+    if [[ "$soma_command" == *"/codex app-server --listen ws://127.0.0.1:"* ]] \
       && [[ "$soma_command" == *" --enable realtime_conversation "* ]] \
       && [[ "$soma_command" == *"mcp_servers.soma_embodiment.env"* ]]; then
       soma_stale_pids+=("$soma_pid")
@@ -184,7 +186,6 @@ if [[ "${SOMA_ENABLE_MOTION:-0}" == "1" ]]; then
     fi
     soma_motion_args=(
       --allow-embodiment-motor-control
-      --embodiment-shadow-socket "$soma_runtime_root/ipc/embodiment-shadow.sock"
       --embodiment-view-directory "$soma_runtime_root/views"
       --allow-camera-motion
       --native-gimbal-helper "$soma_selected_native_helper"
@@ -218,5 +219,6 @@ exec "$soma_binary" \
   "${soma_geometry_args[@]}" \
   "${soma_live_voice_args[@]}" \
   "${soma_panorama_args[@]}" \
+  --embodiment-shadow-socket "$soma_runtime_root/ipc/embodiment-shadow.sock" \
   --soma-settings "$HOME/Library/Application Support/SOMA/settings.json" \
   "${soma_motion_args[@]}"

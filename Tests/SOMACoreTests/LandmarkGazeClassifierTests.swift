@@ -3,6 +3,48 @@ import Testing
 
 struct LandmarkGazeClassifierTests {
     @Test
+    func belowEyeLevelCameraUsesCalibratedVerticalRay() {
+        let lowerCameraEye = EyeLandmarkGeometry(
+            pupilOffsetX: 0.10,
+            pupilOffsetY: 0.10,
+            signedPupilOffsetY: -0.10,
+            apertureRatio: 0.36
+        )
+
+        #expect(LandmarkGazeClassifier.classify(
+            yaw: 0,
+            pitch: nil,
+            leftEye: lowerCameraEye,
+            rightEye: lowerCameraEye
+        ) == .averted)
+        #expect(LandmarkGazeClassifier.classify(
+            yaw: 0,
+            pitch: nil,
+            leftEye: lowerCameraEye,
+            rightEye: lowerCameraEye,
+            expectedDirectPupilOffsetY: -0.10
+        ) == .direct)
+    }
+
+    @Test
+    func belowEyeLevelCalibrationStillRejectsFurtherDownwardGaze() {
+        let phoneEye = EyeLandmarkGeometry(
+            pupilOffsetX: 0.10,
+            pupilOffsetY: 0.16,
+            signedPupilOffsetY: -0.16,
+            apertureRatio: 0.36
+        )
+
+        #expect(LandmarkGazeClassifier.classify(
+            yaw: 0,
+            pitch: nil,
+            leftEye: phoneEye,
+            rightEye: phoneEye,
+            expectedDirectPupilOffsetY: -0.10
+        ) == .averted)
+    }
+
+    @Test
     func directCameraGazeRequiresBilateralOpenCenteredEyes() {
         let assessment = LandmarkGazeClassifier.assess(
             yaw: 0,

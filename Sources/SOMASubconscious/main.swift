@@ -70,6 +70,7 @@ func warmUpL1Model() {
         "model": model,
         "prompt": "ping",
         "stream": false,
+        "think": false,
         "keep_alive": 600,
         "options": ["num_predict": 1],
     ]
@@ -545,6 +546,7 @@ func performL1ObjectIdentification(jpeg: Data) -> String {
         "model": model,
         "messages": messages,
         "stream": false,
+        "think": false,
         "options": ["temperature": 0, "num_predict": 384]
     ]
     guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -619,6 +621,7 @@ func performL1SpaceClassification(jpeg: Data) -> String {
         "model": model,
         "messages": messages,
         "stream": false,
+        "think": false,
         "options": ["temperature": 0, "num_predict": 384]
     ]
     guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
@@ -685,6 +688,7 @@ func performL1AnonymousReview(
         "prompt": prompt,
         "images": [imageData.base64EncodedString()],
         "stream": false,
+        "think": false,
         "format": "json",
         "options": ["temperature": 0.2, "num_predict": 32]
     ]
@@ -1789,42 +1793,37 @@ private final class LatestIdentityBox: @unchecked Sendable {
 
 /// Writes the current primary-face identity to a small always-current JSON file
 /// that the menu bar reads directly (instead of scanning a huge trace tail).
+private struct CurrentIdentityState: Encodable {
+    let state: String
+    let subject: String
+    let label: String
+    let confidence: Double
+}
+
 private func writeIdentityState(
     state: String,
     subject: String,
+    label: String,
     confidence: Double,
     to url: URL
-) {
-    let json = "{\"state\":\(JSONString(state)),\"subject\":\(JSONString(subject)),\"confidence\":\(confidence)}\n"
-    try? json.write(to: url, atomically: true, encoding: .utf8)
+) throws {
+    let snapshot = CurrentIdentityState(
+        state: state,
+        subject: subject,
+        label: label,
+        confidence: confidence
+    )
+    let data = try JSONEncoder().encode(snapshot)
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700]
+    )
+    try data.write(to: url, options: .atomic)
 }
 
 private func clearIdentityState(at url: URL) {
     try? FileManager.default.removeItem(at: url)
-}
-
-/// Minimal JSON string literal escaping for the identity file payload. (A bare
-/// Swift String is not a valid top-level NSJSONSerialization type, so the
-/// escaping must be done by hand.)
-private func JSONString(_ s: String) -> String {
-    var out = "\""
-    for scalar in s.unicodeScalars {
-        switch scalar.value {
-        case 0x22: out += "\\\""       // "
-        case 0x5C: out += "\\\\"       // backslash
-        case 0x08: out += "\\b"
-        case 0x0C: out += "\\f"
-        case 0x0A: out += "\\n"
-        case 0x0D: out += "\\r"
-        case 0x09: out += "\\t"
-        case 0x00...0x1F:
-            out += String(format: "\\u%04x", scalar.value)
-        default:
-            out.append(Character(scalar))
-        }
-    }
-    out += "\""
-    return out
 }
 
 private struct IdentityPresenceUpdate: Sendable {
@@ -2110,6 +2109,17 @@ private func identityDiagnosticLabel(
     case .unknownCandidate:
         return "unknown"
     }
+}
+
+private func identityDisplayLabel(
+    for decision: FaceIdentityRuntimeDecision,
+    administrator: SOMAAdministratorIdentity?
+) -> String {
+    if case let .known(entityID, _, _) = decision,
+       entityID == administrator?.entityID {
+        return administrator?.preferredAddress ?? administrator?.displayName ?? "Administrator"
+    }
+    return identityDiagnosticLabel(for: decision, administrator: administrator)
 }
 
 private func identityPresenceRuntimeEvent(
@@ -10452,9 +10462,14 @@ private final class SystemFaceVerifier: @unchecked Sendable {
     /// 1.0 = default (0.60 X / 0.50 Y). Lower = stricter (pupil must be more
     /// centered); higher = more lenient.
     private let pupilCenteringThreshold: Double
+    private let expectedDirectPupilOffsetY: Double
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
-    init(pupilCenteringThreshold: Double = 1.0) {
+    init(
+        pupilCenteringThreshold: Double = 1.0,
+        expectedDirectPupilOffsetY: Double = 0
+    ) {
         self.pupilCenteringThreshold = min(max(pupilCenteringThreshold, 0.1), 2.0)
+        self.expectedDirectPupilOffsetY = min(max(expectedDirectPupilOffsetY, -0.35), 0.35)
     }
 
     /// VNDetectFaceLandmarksRequest fails on this camera's full-resolution
@@ -10715,7 +10730,8 @@ private final class SystemFaceVerifier: @unchecked Sendable {
             pitch: pitch,
             leftEye: leftGeometry,
             rightEye: rightGeometry,
-            pupilCenteringScale: pupilCenteringThreshold
+            pupilCenteringScale: pupilCenteringThreshold,
+            expectedDirectPupilOffsetY: expectedDirectPupilOffsetY
         )
         return (
             yaw,
@@ -10791,8 +10807,15 @@ private final class SystemFaceVerificationWorker: @unchecked Sendable {
     private var processing = false
     private var stopped = false
 
-    init(pupilCenteringThreshold: Double, maximumRateHz: Double = 5) {
-        verifier = SystemFaceVerifier(pupilCenteringThreshold: pupilCenteringThreshold)
+    init(
+        pupilCenteringThreshold: Double,
+        expectedDirectPupilOffsetY: Double,
+        maximumRateHz: Double = 5
+    ) {
+        verifier = SystemFaceVerifier(
+            pupilCenteringThreshold: pupilCenteringThreshold,
+            expectedDirectPupilOffsetY: expectedDirectPupilOffsetY
+        )
         intervalNS = UInt64(1_000_000_000 / max(maximumRateHz, 1))
     }
 
@@ -11240,7 +11263,8 @@ private final class VisionWorker: @unchecked Sendable {
         onVisualSpeakerEvidence: (@Sendable ([VisualSpeakerFrameEvidence], UInt64) -> Void)? = nil,
         onFatalVisionFailure: (() -> Void)? = nil,
         anonymousReviewProvider: @escaping @Sendable () -> Bool = { true },
-        pupilCenteringThreshold: Double = 1.0
+        pupilCenteringThreshold: Double = 1.0,
+        expectedDirectPupilOffsetY: Double = 0
     ) {
         self.worldModel = worldModel
         self.publisher = publisher
@@ -11259,6 +11283,7 @@ private final class VisionWorker: @unchecked Sendable {
         self.onVisualSpeakerEvidence = onVisualSpeakerEvidence
         self.systemFaceVerificationWorker = SystemFaceVerificationWorker(
             pupilCenteringThreshold: pupilCenteringThreshold,
+            expectedDirectPupilOffsetY: expectedDirectPupilOffsetY,
             // Landmark verification runs independently from the 30 Hz capture
             // loop. At 640px it completes in well under one frame interval on
             // the deployment host, so 12 Hz reduces face-acquisition latency
@@ -12492,6 +12517,44 @@ private func run(_ options: Options) throws {
             message: String(error.localizedDescription.prefix(192))
         ))
     }
+    let discordConversationClient: SOMADiscordConversationClient?
+    if controlSettings.discord.isConfigured {
+        do {
+            if let token = try SOMADiscordSecretStore().loadToken() {
+                discordConversationClient = SOMADiscordConversationClient(
+                    settings: controlSettings.discord,
+                    token: token
+                )
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: monotonicNanoseconds(),
+                    source: "discord_bridge",
+                    state: "armed",
+                    message: "channel_allowlisted=true; labmanager_allowlisted=true; token=sealed_owner_only_store; transcript_trace=false"
+                ))
+            } else {
+                discordConversationClient = nil
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: monotonicNanoseconds(),
+                    source: "discord_bridge",
+                    state: "unavailable",
+                    message: "discord_bot_token_missing"
+                ))
+            }
+        } catch {
+            discordConversationClient = nil
+            writer.write(RuntimeEvent(
+                event: "source.health",
+                monotonicNS: monotonicNanoseconds(),
+                source: "discord_bridge",
+                state: "unavailable",
+                message: String(error.localizedDescription.prefix(192))
+            ))
+        }
+    } else {
+        discordConversationClient = nil
+    }
     let identityPresence = IdentityPresenceCoordinator(
         administrator: controlSettings.administrator,
         openWithUnknownIdentity: somaEnvBool("SOMA_L1_OPEN_WITH_UNKNOWN", default: false)
@@ -13336,7 +13399,7 @@ private func run(_ options: Options) throws {
                     state: "input_transcript_ready",
                     message: "characters=\(min(characters, 65_535)); transcript_trace=false; local_archive=on_final"
                 ))
-            case let .transcriptFinalized(threadID, role, text):
+            case let .transcriptFinalized(threadID, role, text, discordTurnID):
                 if role == .user {
                     // A finalized user transcript is the first reliable proof
                     // that the participant, rather than ambient audio, kept
@@ -13381,6 +13444,68 @@ private func run(_ options: Options) throws {
                         }
                     }
                 }
+                if role == .user,
+                   controlSettings.discord.forwardAdministratorSpeech,
+                   SOMADiscordConversationClient.shouldForwardTranscript(text),
+                   let discordConversationClient,
+                   let discordTurnID,
+                   identityPresence.currentParticipant()?.authority == .administrator {
+                    Task {
+                        do {
+                            let reply = try await discordConversationClient.forwardAdministratorTranscript(
+                                text,
+                                conversationID: threadID
+                            )
+                            guard let reply else {
+                                writer.write(RuntimeEvent(
+                                    event: "source.health",
+                                    monotonicNS: monotonicNanoseconds(),
+                                    source: "discord_bridge",
+                                    state: "reply_timeout",
+                                    message: "labmanager_response_not_observed"
+                                ))
+                                return
+                            }
+                            let delivered = controlSettings.discord.readLabmanagerRepliesAloud
+                                && (liveVoiceBox.launcher?.deliverDiscordReply(
+                                    reply.content,
+                                    messageID: reply.id,
+                                    turnID: discordTurnID
+                                ) ?? false)
+                            writer.write(RuntimeEvent(
+                                event: "discord.message",
+                                monotonicNS: monotonicNanoseconds(),
+                                source: "discord_bridge",
+                                state: delivered ? "reply_queued_or_delivery_requested" : "reply_not_delivered",
+                                message: "channel_allowlisted=true; author=labmanager; turn_bound=true; characters=\(reply.content.count)"
+                            ))
+                        } catch {
+                            writer.write(RuntimeEvent(
+                                event: "source.health",
+                                monotonicNS: monotonicNanoseconds(),
+                                source: "discord_bridge",
+                                state: "request_failed",
+                                message: String(error.localizedDescription.prefix(192))
+                            ))
+                        }
+                    }
+                }
+            case .discordReplyAccepted:
+                writer.write(RuntimeEvent(
+                    event: "discord.message",
+                    monotonicNS: eventNS,
+                    source: "discord_bridge",
+                    state: "reply_accepted_by_live_voice",
+                    message: "controller_envelope=true; participant_authorization=false"
+                ))
+            case let .discordReplyRejected(reason):
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: eventNS,
+                    source: "discord_bridge",
+                    state: "reply_rejected_by_live_voice",
+                    message: String(reason.prefix(192))
+                ))
             case .preparingResponse:
                 l1LiveConversationState.setParticipantSpeaking(false)
                 attentionGimbalBridge?.ingestLiveVoicePresentation(.preparingResponse)
@@ -13953,6 +14078,12 @@ private func run(_ options: Options) throws {
     )
     let embodimentShadowServer: EmbodimentShadowSocketServer?
     if let socketURL = options.embodimentShadowSocketURL {
+        let runtimeRoot = ProcessInfo.processInfo.environment["SOMA_RUNTIME_ROOT"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? socketURL.deletingLastPathComponent().deletingLastPathComponent()
+        let hostComputerController = try HostComputerController(
+            directoryURL: runtimeRoot.appendingPathComponent("host-screen", isDirectory: true)
+        )
         let server = EmbodimentShadowSocketServer(
             socketURL: socketURL,
             arbiter: embodimentArbiter,
@@ -14285,6 +14416,24 @@ private func run(_ options: Options) throws {
                 }
                 return result
             },
+            hostComputerProvider: { request in
+                let result = hostComputerController.handle(request)
+                let state: String
+                switch result {
+                case .success:
+                    state = request.operation.rawValue
+                case .failure:
+                    state = "failed"
+                }
+                writer.write(RuntimeEvent(
+                    event: "host.computer",
+                    monotonicNS: monotonicNanoseconds(),
+                    source: "l2_mcp",
+                    state: state,
+                    message: "operation=\(request.operation.rawValue); input_kind=\(request.input?.kind.rawValue ?? "none"); content_logged=false"
+                ))
+                return result
+            },
             onHealth: { state, message in
                 writer.write(RuntimeEvent(
                     event: "source.health",
@@ -14371,12 +14520,23 @@ private func run(_ options: Options) throws {
                 confidence: decision.confidence,
                 observedNS: monotonicNS
             )
-            writeIdentityState(
-                state: decision.state,
-                subject: decision.opaqueSubject,
-                confidence: decision.confidence,
-                to: identityStateURL
-            )
+            do {
+                try writeIdentityState(
+                    state: decision.state,
+                    subject: decision.opaqueSubject,
+                    label: identityDisplayLabel(for: decision, administrator: controlSettings.administrator),
+                    confidence: decision.confidence,
+                    to: identityStateURL
+                )
+            } catch {
+                writer.write(RuntimeEvent(
+                    event: "source.health",
+                    monotonicNS: monotonicNS,
+                    source: "identity_handoff",
+                    state: "write_failed",
+                    message: String(error.localizedDescription.prefix(192))
+                ))
+            }
             // The presence coordinator intentionally emits only arrival,
             // replacement, and departure transitions. L1 needs the continuous
             // recognized samples as its freshness signal, otherwise a stable
@@ -14466,7 +14626,10 @@ private func run(_ options: Options) throws {
             complete.signal()
         },
         anonymousReviewProvider: { anonymousReviewBox.approve() },
-        pupilCenteringThreshold: somaEnvDouble("SOMA_L0_EYE_CONTACT_PUPIL_THRESHOLD", default: 0.9)
+        pupilCenteringThreshold: somaEnvDouble("SOMA_L0_EYE_CONTACT_PUPIL_THRESHOLD", default: 0.9),
+        expectedDirectPupilOffsetY: SOMACameraVerticalPlacement(
+            rawValue: somaEnvString("SOMA_L0_CAMERA_VERTICAL_PLACEMENT", default: "eye_level")
+        )?.expectedDirectPupilOffsetY ?? 0
     )
     let eventImportanceModel = EventImportanceModel()
     let speechInteraction: LocalSpeechInteractionCoordinator?
@@ -14685,8 +14848,11 @@ private func run(_ options: Options) throws {
                     message: "new_conversation_evidence_unconfirmed; tracked_face=\(visualAdmission); direct_gaze=\(speakerSnapshot.evidence.directGaze); speaker_class=\(speakerSnapshot.assessment.classification.rawValue); speaker_episode=\(speakerEpisode.state.rawValue); speech_qualified=\(speakerEpisode.speechEvidence.qualified); strong_windows=\(speakerEpisode.speechEvidence.strongWindowCount); supporting_windows=\(speakerEpisode.speechEvidence.supportingWindowCount)"
                 ))
             }
+            let administratorOpeningAllowed = !controlSettings.administratorOnlyConversations
+                || recognizedParticipant?.authority == .administrator
             if let openingAuthorization,
-               options.l2LiveVoice {
+               options.l2LiveVoice,
+               administratorOpeningAllowed {
                 let sessionCapability = liveSessionCapabilities.issue(
                     personEntityID: interactionParticipant.entityID,
                     authority: interactionParticipant.authority,
@@ -14720,6 +14886,16 @@ private func run(_ options: Options) throws {
                     personEntityID: interactionParticipant.entityID,
                     at: completedNS
                 )
+            } else if openingAuthorization != nil,
+                      controlSettings.administratorOnlyConversations,
+                      !administratorOpeningAllowed {
+                writer.write(RuntimeEvent(
+                    event: "human.interaction",
+                    monotonicNS: completedNS,
+                    source: "l2_live_voice",
+                    state: "opening_suppressed",
+                    message: "administrator_only=true; recognized_administrator=false"
+                ))
             } else if openingAuthorization != nil, !options.l2LiveVoice {
                 writer.write(RuntimeEvent(
                     event: "source.health",
@@ -14738,8 +14914,12 @@ private func run(_ options: Options) throws {
                 || openingAuthorization != nil
                 || strictConfirmedWindow
             if shouldTraceSpeakerTransition || evidence.active {
-                let strictTurnAdmission = !controlSettings
-                    .realtimeVoiceRequiresEyeContactForEveryTurn || confirmedTrackedSpeaker
+                let administratorTurnAllowed = !controlSettings.administratorOnlyConversations
+                    || recognizedParticipant?.authority == .administrator
+                let strictTurnAdmission = administratorTurnAllowed && (
+                    !controlSettings.realtimeVoiceRequiresEyeContactForEveryTurn
+                        || confirmedTrackedSpeaker
+                )
                 let duplexSpeakerVerified = LiveVoiceDuplexSpeakerPolicy.verifiesParticipant(
                     trackedFaceVisible: visualAdmission,
                     independentSpeakerEvidence: speakerEpisode.speakerEvidenceObserved,

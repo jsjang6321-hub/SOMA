@@ -193,6 +193,13 @@ final class EventImportanceTests: XCTestCase {
         XCTAssertTrue(L2CognitiveToolPolicy.permits(.autonomousGoal, for: "capture_view"))
         XCTAssertFalse(L2CognitiveToolPolicy.permits(.autonomousGoal, for: "set_audio_input_gain"))
         XCTAssertTrue(L2CognitiveToolPolicy.permits(.explicitRequest, for: "set_audio_input_gain"))
+        XCTAssertEqual(L2CognitiveToolPolicy.autonomy(for: "observe_host_screen"), .explicitRequest)
+        XCTAssertEqual(L2CognitiveToolPolicy.autonomy(for: "control_host_computer"), .explicitRequest)
+        XCTAssertFalse(L2CognitiveToolPolicy.permits(.autonomousGoal, for: "observe_host_screen"))
+        XCTAssertTrue(L2CognitiveToolPolicy.permits(.explicitRequest, for: "observe_host_screen"))
+        XCTAssertEqual(L2CognitiveToolPolicy.effect(for: "control_host_computer"), .hostComputer)
+        XCTAssertFalse(L2CognitiveToolPolicy.usesSemanticDeduplication(for: "observe_host_screen"))
+        XCTAssertTrue(L2CognitiveToolPolicy.usesSemanticDeduplication(for: "control_host_computer"))
         XCTAssertFalse(L2CognitiveToolPolicy.permits(.explicitStatement, for: "enroll_present_identity"))
         XCTAssertTrue(L2CognitiveToolPolicy.permits(.explicitConsent, for: "enroll_present_identity"))
         XCTAssertThrowsError(try JSONDecoder().decode(
