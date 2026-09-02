@@ -26,7 +26,12 @@ enum AppServerLiveVoiceEvent: Sendable {
     case personContextUnavailable(reason: String)
     case embodimentMCPCall(tool: String, status: String, error: String?)
     case inputAccepted(characters: Int)
-    case transcriptFinalized(threadID: String?, role: ConversationParticipantRole, text: String)
+    case transcriptFinalized(
+        threadID: String?,
+        role: ConversationParticipantRole,
+        text: String,
+        discordTurnID: String?
+    )
     case preparingResponse
     case responseStarted(latencyMilliseconds: Double)
     case assistantSpeechStarted
@@ -155,7 +160,9 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
     private var activeSessionCapability: String?
     private var openingVisualContextAttached = false
     private var awaitingAssistantResponse = false
+    private var assistantPlaybackActive = false
     private var latestUserTranscriptNS: UInt64?
+    private var discordFollowUps = SOMADiscordFollowUpCoordinator()
     private var initialTurnValidation: LiveVoiceInitialTurnValidation
     private var proactiveOpeningAwaitingParticipant = false
     private var proactiveOpeningDelivered = false
@@ -547,7 +554,9 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
     private func resetSessionEphemera(keepingAudioCapacity: Bool) {
         activeTurnAudioAdmitted = false
         awaitingAssistantResponse = false
+        assistantPlaybackActive = false
         latestUserTranscriptNS = nil
+        discordFollowUps.reset()
         initialTurnValidation.reset()
         speakerEpisodeAudio.end(keepingCapacity: keepingAudioCapacity)
         speakerEpisodeInProgress = false
@@ -648,26 +657,40 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
         }
     }
 
-    /// Routes one allowlisted Discord bot reply into the active realtime
-    /// conversation. The envelope is controller input, never participant
-    /// speech or authorization, and it cannot open a session on its own.
-    func deliverDiscordReply(_ rawText: String, messageID: String) -> Bool {
+    /// Queues one allowlisted Discord bot reply for the local-first turn that
+    /// caused it. The first local response and its playback are allowed to
+    /// finish before the contextual follow-up is injected. The envelope is
+    /// controller input, never participant speech or authorization, and it
+    /// cannot open a session on its own.
+    func deliverDiscordReply(_ rawText: String, messageID: String, turnID: String) -> Bool {
         queue.sync {
             guard active else { return false }
             let reply = SOMADiscordConversationClient.spokenReply(from: rawText)
             guard !reply.isEmpty else { return false }
-            let safeMessageID = String(messageID.filter(\.isNumber).prefix(24))
-            let envelope = """
-            SOMA_DISCORD_LABMANAGER_REPLY
-            message_id: \(safeMessageID)
-            reply:
-            \(reply)
-            """
-            return send([
-                "type": "append_controller_text",
-                "data": envelope,
-            ])
+            guard discordFollowUps.acceptReply(
+                turnID: turnID,
+                messageID: messageID,
+                reply: reply
+            ) else { return false }
+            _ = deliverNextDiscordFollowUpIfReady()
+            return true
         }
+    }
+
+    @discardableResult
+    private func deliverNextDiscordFollowUpIfReady() -> Bool {
+        guard active,
+              let delivery = discordFollowUps.nextDelivery(
+                canDeliver: !awaitingAssistantResponse && !assistantPlaybackActive
+              ) else { return false }
+        let sent = send([
+            "type": "append_controller_text",
+            "data": delivery.controllerText,
+        ])
+        if !sent {
+            discordFollowUps.deliveryFailed(turnID: delivery.turnID)
+        }
+        return sent
     }
 
     private func sendHermesTaskResult(_ task: HermesAgentTask) -> Bool {
@@ -728,7 +751,9 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
         inputTransportReported = false
         openingVisualContextAttached = false
         awaitingAssistantResponse = false
+        assistantPlaybackActive = false
         latestUserTranscriptNS = nil
+        discordFollowUps.reset()
         inputLeveler.reset()
         resetDuplexCaptureState()
         activeTurnAudioAdmitted = false
@@ -917,6 +942,7 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
             case "natural_turn_taking_confirmed":
                 onEvent(.naturalTurnTakingConfirmed)
             case "response_interrupted":
+                discordFollowUps.responseInterrupted()
                 onEvent(.responseInterrupted)
             case "interrupted_audio_cleared":
                 onEvent(.interruptedAudioCleared)
@@ -953,6 +979,7 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
             case "discord_reply_accepted":
                 onEvent(.discordReplyAccepted)
             case "discord_reply_rejected":
+                discordFollowUps.discardInFlightDelivery()
                 onEvent(.discordReplyRejected(
                     reason: String((event.reason ?? "unknown").prefix(192))
                 ))
@@ -979,7 +1006,17 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                       let role = ConversationParticipantRole(rawValue: rawRole),
                       let text = event.text?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !text.isEmpty else { continue }
+                if role == .user, Self.isControllerEnvelope(text) {
+                    // Controller injections are already present in the remote
+                    // conversation. They are not participant speech, must not
+                    // enter local memory, and must not create another Discord
+                    // request if App Server echoes them as transcript items.
+                    continue
+                }
+                let discordTurnID: String?
                 if role == .assistant {
+                    discordFollowUps.recordAssistantTranscript(text)
+                    discordTurnID = nil
                     if proactiveOpeningAwaitingParticipant {
                         if proactiveOpeningDelivered {
                             onEvent(.proactiveOpeningExtraOutputSuppressed)
@@ -992,6 +1029,10 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                     confirmInitialParticipantInput()
                     proactiveOpeningAwaitingParticipant = false
                     let now = DispatchTime.now().uptimeNanoseconds
+                    discordTurnID = discordFollowUps.registerUserTurn(
+                        threadID: event.threadID,
+                        text: text
+                    )
                     awaitingAssistantResponse = true
                     latestUserTranscriptNS = now
                     recordUserActivity(at: now)
@@ -1000,7 +1041,8 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                 onEvent(.transcriptFinalized(
                     threadID: event.threadID,
                     role: role,
-                    text: String(text.prefix(8_192))
+                    text: String(text.prefix(8_192)),
+                    discordTurnID: discordTurnID
                 ))
             case "response_preparing":
                 if !initialTurnValidation.permitsAssistantResponse {
@@ -1014,6 +1056,7 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                     continue
                 }
                 echoReferenceMatcher.reset()
+                assistantPlaybackActive = true
                 lastEchoRelationship = nil
                 outputReferenceReported = false
                 duplexCaptureGate.beginAssistantOutput(at: DispatchTime.now().uptimeNanoseconds)
@@ -1032,7 +1075,9 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                 onEvent(.responding)
             case "output_speech_ended":
                 duplexCaptureGate.endAssistantOutput(at: DispatchTime.now().uptimeNanoseconds)
+                assistantPlaybackActive = false
                 onEvent(.assistantSpeechEnded)
+                _ = deliverNextDiscordFollowUpIfReady()
             case "assistant_output_reference":
                 guard let data = event.data,
                       let sampleRate = event.sampleRate,
@@ -1064,8 +1109,10 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
                 // Generation can complete before the remote playback buffer
                 // drains, so microphone capture resumes only when playback
                 // reports output_speech_ended.
+                discordFollowUps.responseFinished()
                 finishAssistantResponseIfNeeded()
                 onEvent(.responseCompleted)
+                _ = deliverNextDiscordFollowUpIfReady()
             case "ended":
                 guard active || gate.phase == .starting else { continue }
                 let threadID = event.threadID ?? activeThreadID
@@ -1156,6 +1203,15 @@ final class AppServerLiveVoiceLauncher: @unchecked Sendable {
     private func elapsedMilliseconds(from earlier: UInt64, to later: UInt64) -> Double {
         guard later >= earlier else { return 0 }
         return Double(later - earlier) / 1_000_000
+    }
+
+    private static func isControllerEnvelope(_ text: String) -> Bool {
+        [
+            "SOMA_DISCORD_LABMANAGER_REPLY",
+            "SOMA_HERMES_TASK_RESULT",
+            "SOMA_HERMES_DELEGATION_ACCEPTED",
+            "SOMA_EXACT_OPENING",
+        ].contains { text.hasPrefix($0) }
     }
 
     private func armInactivityTimeout(at monotonicNS: UInt64) {

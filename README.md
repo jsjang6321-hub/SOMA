@@ -248,10 +248,13 @@ A reply is accepted only when its channel ID and bot author ID both match the sa
 allowlist and it echoes the request's one-time `voice-corr` marker. The existing
 Labmanager deployment uses a direct bot-user mention; a managed-role mention is
 also selectable for other deployments. When the originating Live Voice session
-is still active, the reply is returned as a controller envelope and read aloud;
-Discord text is never
-treated as participant authorization and cannot authorize tools or external
-work.
+is still active, SOMA lets its primary local response and playback finish first.
+The reply is then bound to the originating user turn together with the first
+local answer and returned as a controller envelope. L2 stays silent when the
+reply is merely redundant; otherwise it gives one concise follow-up that adds
+new information, explicitly corrects the earlier answer, or reports the actual
+accepted, completed, or failed mission state. Discord text is never treated as
+participant authorization and cannot authorize tools or external work.
 
 The Discord bot token is sealed with ChaChaPoly in SOMA's owner-only local
 credential store rather than `settings.json`, the repository, process arguments,

@@ -13399,7 +13399,7 @@ private func run(_ options: Options) throws {
                     state: "input_transcript_ready",
                     message: "characters=\(min(characters, 65_535)); transcript_trace=false; local_archive=on_final"
                 ))
-            case let .transcriptFinalized(threadID, role, text):
+            case let .transcriptFinalized(threadID, role, text, discordTurnID):
                 if role == .user {
                     // A finalized user transcript is the first reliable proof
                     // that the participant, rather than ambient audio, kept
@@ -13448,6 +13448,7 @@ private func run(_ options: Options) throws {
                    controlSettings.discord.forwardAdministratorSpeech,
                    SOMADiscordConversationClient.shouldForwardTranscript(text),
                    let discordConversationClient,
+                   let discordTurnID,
                    identityPresence.currentParticipant()?.authority == .administrator {
                     Task {
                         do {
@@ -13468,14 +13469,15 @@ private func run(_ options: Options) throws {
                             let delivered = controlSettings.discord.readLabmanagerRepliesAloud
                                 && (liveVoiceBox.launcher?.deliverDiscordReply(
                                     reply.content,
-                                    messageID: reply.id
+                                    messageID: reply.id,
+                                    turnID: discordTurnID
                                 ) ?? false)
                             writer.write(RuntimeEvent(
                                 event: "discord.message",
                                 monotonicNS: monotonicNanoseconds(),
                                 source: "discord_bridge",
-                                state: delivered ? "reply_delivery_requested" : "reply_not_delivered",
-                                message: "channel_allowlisted=true; author=labmanager; characters=\(reply.content.count)"
+                                state: delivered ? "reply_queued_or_delivery_requested" : "reply_not_delivered",
+                                message: "channel_allowlisted=true; author=labmanager; turn_bound=true; characters=\(reply.content.count)"
                             ))
                         } catch {
                             writer.write(RuntimeEvent(

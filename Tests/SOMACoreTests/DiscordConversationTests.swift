@@ -4,6 +4,104 @@ import XCTest
 @testable import SOMACore
 
 final class DiscordConversationTests: XCTestCase {
+    func testConfiguredDiscordRoundTripWhenExplicitlyEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["SOMA_RUN_LIVE_DISCORD_SMOKE"] == "1" else {
+            throw XCTSkip("live Discord smoke test requires explicit opt-in")
+        }
+        let settings = try SOMAControlSettingsStore().load().discord
+        let token = try XCTUnwrap(try SOMADiscordSecretStore().loadToken())
+        let client = SOMADiscordConversationClient(settings: settings, token: token)
+
+        let username = try await client.validateConnection()
+        XCTAssertFalse(username.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty)
+        let reply = try await client.forwardAdministratorTranscript(
+            "SOMA 로컬 우선 Discord 후속응답 시운전입니다. voice-corr 표식을 그대로 포함해 '연동 확인'이라고 짧게 회신해 주세요.",
+            conversationID: "discord-follow-up-smoke"
+        )
+        XCTAssertNotNil(reply)
+    }
+
+    func testFollowUpWaitsForPrimaryLocalResponseAndCarriesTurnContext() throws {
+        var coordinator = SOMADiscordFollowUpCoordinator()
+        let turnID = try XCTUnwrap(coordinator.registerUserTurn(
+            threadID: "thread-1",
+            text: "오늘 운영 상태를 확인해 줘"
+        ))
+
+        coordinator.recordAssistantTranscript("제가 확인한 로컬 상태는 정상입니다.")
+        XCTAssertTrue(coordinator.acceptReply(
+            turnID: turnID,
+            messageID: "123456789012345678",
+            reply: "Labmanager 기준으로 배포 작업은 아직 진행 중입니다."
+        ))
+        XCTAssertNil(coordinator.nextDelivery(canDeliver: true))
+
+        coordinator.responseFinished()
+        let delivery = try XCTUnwrap(coordinator.nextDelivery(canDeliver: true))
+        XCTAssertEqual(delivery.turnID, turnID)
+        XCTAssertEqual(delivery.messageID, "123456789012345678")
+        XCTAssertTrue(delivery.controllerText.hasPrefix("SOMA_DISCORD_LABMANAGER_REPLY\n{"))
+        XCTAssertTrue(delivery.controllerText.contains("오늘 운영 상태를 확인해 줘"))
+        XCTAssertTrue(delivery.controllerText.contains("제가 확인한 로컬 상태는 정상입니다."))
+        XCTAssertTrue(delivery.controllerText.contains("아직 진행 중입니다."))
+        XCTAssertNil(coordinator.nextDelivery(canDeliver: true))
+    }
+
+    func testFollowUpCanArriveBeforeLocalTranscriptAndStillDeliversAfterCompletion() throws {
+        var coordinator = SOMADiscordFollowUpCoordinator()
+        let turnID = try XCTUnwrap(coordinator.registerUserTurn(
+            threadID: "thread-2",
+            text: "Labmanager에게 물어봐"
+        ))
+        XCTAssertTrue(coordinator.acceptReply(
+            turnID: turnID,
+            messageID: "223456789012345678",
+            reply: "확인했습니다."
+        ))
+        XCTAssertNil(coordinator.nextDelivery(canDeliver: true))
+
+        coordinator.responseFinished()
+        let delivery = try XCTUnwrap(coordinator.nextDelivery(canDeliver: true))
+        XCTAssertTrue(delivery.controllerText.contains("\"local_response\""))
+        XCTAssertTrue(delivery.controllerText.contains("Labmanager에게 물어봐"))
+        coordinator.responseFinished()
+        XCTAssertNil(coordinator.nextDelivery(canDeliver: true))
+    }
+
+    func testNewParticipantTurnReleasesAnInterruptedPrimaryTurnForLaterFollowUp() throws {
+        var coordinator = SOMADiscordFollowUpCoordinator()
+        let firstTurnID = try XCTUnwrap(coordinator.registerUserTurn(
+            threadID: "thread-3",
+            text: "첫 번째 질문"
+        ))
+        _ = coordinator.registerUserTurn(threadID: "thread-3", text: "두 번째 질문")
+        XCTAssertTrue(coordinator.acceptReply(
+            turnID: firstTurnID,
+            messageID: "323456789012345678",
+            reply: "첫 번째 질문의 외부 답변"
+        ))
+
+        XCTAssertNotNil(coordinator.nextDelivery(canDeliver: true))
+    }
+
+    func testRejectedRealtimeHandoffIsNotRetried() throws {
+        var coordinator = SOMADiscordFollowUpCoordinator()
+        let turnID = try XCTUnwrap(coordinator.registerUserTurn(
+            threadID: "thread-4",
+            text: "외부 상태를 확인해 줘"
+        ))
+        coordinator.responseFinished()
+        XCTAssertTrue(coordinator.acceptReply(
+            turnID: turnID,
+            messageID: "423456789012345678",
+            reply: "외부 상태 응답"
+        ))
+        XCTAssertNotNil(coordinator.nextDelivery(canDeliver: true))
+
+        coordinator.discardInFlightDelivery()
+        XCTAssertNil(coordinator.nextDelivery(canDeliver: true))
+    }
+
     func testSecretStoreRoundTripsWithoutPersistingPlaintext() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("soma-discord-secret-\(UUID().uuidString)", isDirectory: true)

@@ -466,3 +466,220 @@ public actor SOMADiscordConversationClient {
         return .rejected(response.statusCode, String(message.prefix(240)))
     }
 }
+
+/// Binds an asynchronous Labmanager reply to the participant turn that caused
+/// it. Live Voice remains the primary conversational path: the first local
+/// response is allowed to finish, then the validated Discord result can become
+/// one contextual follow-up instead of an unrelated second user message.
+public struct SOMADiscordFollowUpCoordinator: Sendable {
+    public struct Delivery: Equatable, Sendable {
+        public let turnID: String
+        public let messageID: String
+        public let controllerText: String
+
+        public init(turnID: String, messageID: String, controllerText: String) {
+            self.turnID = turnID
+            self.messageID = messageID
+            self.controllerText = controllerText
+        }
+    }
+
+    private struct PendingTurn: Sendable {
+        let id: String
+        let threadID: String?
+        let originalRequest: String
+        var localResponse: String?
+        var localResponseFinished = false
+        var discordMessageID: String?
+        var discordReply: String?
+    }
+
+    private struct ControllerPayload: Encodable {
+        let schemaVersion: Int
+        let turnID: String
+        let threadID: String?
+        let messageID: String
+        let originalRequest: String
+        let localResponse: String
+        let labmanagerReply: String
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case turnID = "turn_id"
+            case threadID = "thread_id"
+            case messageID = "message_id"
+            case originalRequest = "original_request"
+            case localResponse = "local_response"
+            case labmanagerReply = "labmanager_reply"
+        }
+    }
+
+    private var turns: [String: PendingTurn] = [:]
+    private var turnOrder: [String] = []
+    private var currentLocalTurnID: String?
+    private var followUpInFlightTurnID: String?
+    private let maximumPendingTurns: Int
+
+    public init(maximumPendingTurns: Int = 32) {
+        self.maximumPendingTurns = min(max(maximumPendingTurns, 4), 128)
+    }
+
+    /// Starts a local-first turn. A newly spoken participant turn supersedes
+    /// any unfinished local response for the previous turn, but a later
+    /// Discord result for that previous request may still be reported.
+    @discardableResult
+    public mutating func registerUserTurn(threadID: String?, text rawText: String) -> String? {
+        let text = Self.boundedText(rawText, limit: 4_000)
+        guard !text.isEmpty else { return nil }
+        if let currentLocalTurnID, var previous = turns[currentLocalTurnID] {
+            previous.localResponseFinished = true
+            turns[currentLocalTurnID] = previous
+        }
+        let turnID = UUID().uuidString.lowercased()
+        turns[turnID] = PendingTurn(
+            id: turnID,
+            threadID: threadID.map { Self.boundedText($0, limit: 128) },
+            originalRequest: text
+        )
+        turnOrder.append(turnID)
+        currentLocalTurnID = turnID
+        pruneIfNeeded()
+        return turnID
+    }
+
+    /// Captures only the primary local answer. Assistant text generated for a
+    /// Discord follow-up must never replace the stored first answer.
+    public mutating func recordAssistantTranscript(_ rawText: String) {
+        guard followUpInFlightTurnID == nil,
+              let currentLocalTurnID,
+              var turn = turns[currentLocalTurnID] else { return }
+        let text = Self.boundedText(rawText, limit: 4_000)
+        guard !text.isEmpty else { return }
+        turn.localResponse = text
+        turns[currentLocalTurnID] = turn
+    }
+
+    /// Completes either the primary response or the currently injected
+    /// Discord follow-up. The caller decides when playback is quiet enough to
+    /// dequeue another result.
+    public mutating func responseFinished() {
+        if let followUpInFlightTurnID {
+            removeTurn(followUpInFlightTurnID)
+            self.followUpInFlightTurnID = nil
+            return
+        }
+        guard let currentLocalTurnID, var turn = turns[currentLocalTurnID] else { return }
+        turn.localResponseFinished = true
+        turns[currentLocalTurnID] = turn
+    }
+
+    public mutating func responseInterrupted() {
+        responseFinished()
+    }
+
+    /// Stores a validated, already-sanitized Labmanager reply. Arrival is not
+    /// permission to interrupt the local answer; `nextDelivery` enforces that
+    /// the primary response has finished first.
+    @discardableResult
+    public mutating func acceptReply(
+        turnID: String,
+        messageID rawMessageID: String,
+        reply rawReply: String
+    ) -> Bool {
+        guard var turn = turns[turnID] else { return false }
+        let reply = Self.boundedText(rawReply, limit: 4_000)
+        let messageID = String(rawMessageID.filter(\.isNumber).prefix(24))
+        guard !reply.isEmpty, !messageID.isEmpty else { return false }
+        turn.discordReply = reply
+        turn.discordMessageID = messageID
+        turns[turnID] = turn
+        return true
+    }
+
+    /// Returns the oldest completed local turn with a pending Discord result.
+    /// Only one follow-up may be in flight at a time.
+    public mutating func nextDelivery(canDeliver: Bool) -> Delivery? {
+        guard canDeliver, followUpInFlightTurnID == nil else { return nil }
+        guard let turnID = turnOrder.first(where: { id in
+            guard let turn = turns[id] else { return false }
+            return turn.localResponseFinished
+                && turn.discordReply != nil
+                && turn.discordMessageID != nil
+        }), let turn = turns[turnID],
+            let messageID = turn.discordMessageID,
+            let reply = turn.discordReply,
+            let controllerText = Self.controllerText(
+                turn: turn,
+                messageID: messageID,
+                reply: reply
+            ) else { return nil }
+        followUpInFlightTurnID = turnID
+        return Delivery(turnID: turnID, messageID: messageID, controllerText: controllerText)
+    }
+
+    /// Makes a failed local handoff retryable on the next quiet-state edge.
+    public mutating func deliveryFailed(turnID: String) {
+        guard followUpInFlightTurnID == turnID else { return }
+        followUpInFlightTurnID = nil
+    }
+
+    /// Drops a controller handoff rejected by the realtime transport. Keeping
+    /// it queued would retry the same rejected envelope on every playback edge.
+    public mutating func discardInFlightDelivery() {
+        guard let followUpInFlightTurnID else { return }
+        removeTurn(followUpInFlightTurnID)
+        self.followUpInFlightTurnID = nil
+    }
+
+    public mutating func reset() {
+        turns.removeAll(keepingCapacity: true)
+        turnOrder.removeAll(keepingCapacity: true)
+        currentLocalTurnID = nil
+        followUpInFlightTurnID = nil
+    }
+
+    private mutating func pruneIfNeeded() {
+        while turnOrder.count > maximumPendingTurns {
+            guard let candidate = turnOrder.first(where: { $0 != followUpInFlightTurnID }) else {
+                return
+            }
+            removeTurn(candidate)
+        }
+    }
+
+    private mutating func removeTurn(_ turnID: String) {
+        turns.removeValue(forKey: turnID)
+        turnOrder.removeAll { $0 == turnID }
+        if currentLocalTurnID == turnID { currentLocalTurnID = nil }
+    }
+
+    private static func controllerText(
+        turn: PendingTurn,
+        messageID: String,
+        reply: String
+    ) -> String? {
+        let payload = ControllerPayload(
+            schemaVersion: 1,
+            turnID: turn.id,
+            threadID: turn.threadID,
+            messageID: messageID,
+            originalRequest: turn.originalRequest,
+            localResponse: turn.localResponse ?? "",
+            labmanagerReply: reply
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(payload),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "SOMA_DISCORD_LABMANAGER_REPLY\n\(json)"
+    }
+
+    private static func boundedText(_ rawText: String, limit: Int) -> String {
+        String(
+            rawText
+                .replacingOccurrences(of: "\0", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(limit)
+        )
+    }
+}

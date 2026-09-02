@@ -979,7 +979,7 @@ private struct SOMASettingsView: View {
             }
             SettingsCard(
                 title: "Discord · @Labmanager",
-                subtitle: "Forward verified administrator speech to one allowlisted Discord channel and read the existing bot's reply aloud."
+                subtitle: "Keep Live Voice local-first, then use a verified Labmanager reply for a contextual follow-up."
             ) {
                 Toggle("Enable Discord conversation bridge", isOn: discordEnabledBinding)
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
@@ -1019,7 +1019,7 @@ private struct SOMASettingsView: View {
                 .disabled(!model.settings.discord.enabled)
                 Toggle("Forward finalized administrator speech immediately", isOn: discordForwardSpeechBinding)
                     .disabled(!model.settings.discord.enabled)
-                Toggle("Read @Labmanager replies aloud through Live Voice", isOn: discordReadRepliesBinding)
+                Toggle("Use @Labmanager replies for Live Voice follow-ups", isOn: discordReadRepliesBinding)
                     .disabled(!model.settings.discord.enabled)
                 HStack {
                     Button("Check connection") {
@@ -1035,7 +1035,7 @@ private struct SOMASettingsView: View {
                         Text(status).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text("The existing Labmanager contract uses Bot user mention. Managed role mention is available for other deployments. Replies must come from the configured bot in this channel and echo the request's voice-corr marker. The token is sealed in SOMA's owner-only local credential store and never enters settings.json or Git.")
+                Text("The existing Labmanager contract uses Bot user mention. Managed role mention is available for other deployments. Replies must come from the configured bot in this channel and echo the request's voice-corr marker. SOMA finishes its local answer first, then adds, corrects, or reports mission status only from the turn-bound reply. The token is sealed in SOMA's owner-only local credential store and never enters settings.json or Git.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
